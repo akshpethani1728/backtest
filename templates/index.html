@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtesting Tool - EMA Crossover + ATR</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #f5f7fa;
+            color: #333;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: white;
+            padding: 30px 0;
+            margin-bottom: 30px;
+            border-radius: 0 0 10px 10px;
+        }
+
+        header h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        header p {
+            text-align: center;
+            opacity: 0.8;
+            font-size: 0.95rem;
+            margin-top: 5px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-group label {
+            font-weight: 500;
+            margin-bottom: 8px;
+            color: #444;
+            font-size: 0.9rem;
+        }
+
+        .form-group input,
+        .form-group select {
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 1rem;
+            transition: border-color 0.2s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #1a1a2e;
+        }
+
+        .btn-primary {
+            background: #1a1a2e;
+            color: white;
+            border: none;
+            padding: 14px 30px;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-top: 10px;
+        }
+
+        .btn-primary:hover {
+            background: #16213e;
+        }
+
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .btn-primary.loading {
+            position: relative;
+            color: transparent;
+        }
+
+        .btn-primary.loading::after {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 2px solid white;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        @keyframes spin {
+            to { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+
+        .error-box {
+            background: #fee;
+            border: 1px solid #fcc;
+            color: #c00;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .error-box.show {
+            display: block;
+        }
+
+        .results {
+            display: none;
+        }
+
+        .results.show {
+            display: block;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-box {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-box .label {
+            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .stat-box .value {
+            font-size: 1.4rem;
+            font-weight: 600;
+            color: #1a1a2e;
+        }
+
+        .stat-box .value.positive {
+            color: #28a745;
+        }
+
+        .stat-box .value.negative {
+            color: #dc3545;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+
+        th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #444;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+        }
+
+        td {
+            font-size: 0.9rem;
+        }
+
+        tr:hover {
+            background: #f8f9fa;
+        }
+
+        .trade-buy {
+            color: #28a745;
+            font-weight: 500;
+        }
+
+        .trade-sell {
+            color: #dc3545;
+            font-weight: 500;
+        }
+
+        .pnl-positive {
+            color: #28a745;
+        }
+
+        .pnl-negative {
+            color: #dc3545;
+        }
+
+        #equityChart {
+            width: 100%;
+            height: 300px;
+            margin-top: 20px;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 15px;
+        }
+
+        .info-text {
+            font-size: 0.85rem;
+            color: #666;
+            margin-top: 10px;
+        }
+
+        .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .no-trades {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        @media (max-width: 768px) {
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+
+            table {
+                font-size: 0.8rem;
+            }
+
+            th, td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Backtesting Tool</h1>
+        <p>EMA Crossover with ATR Trailing Stop</p>
+    </header>
+
+    <div class="container">
+        <div class="card">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="symbol">Symbol</label>
+                    <input type="text" id="symbol" placeholder="e.g., EURUSD=X, BTC-USD" value="EURUSD=X">
+                    <span class="info-text">Use Yahoo Finance format</span>
+                </div>
+
+                <div class="form-group">
+                    <label for="timeframe">Timeframe</label>
+                    <select id="timeframe">
+                        <option value="15m">15 Minutes</option>
+                        <option value="1h" selected>1 Hour</option>
+                        <option value="1d">1 Day</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="start_date">Start Date</label>
+                    <input type="date" id="start_date" value="2024-01-01">
+                </div>
+
+                <div class="form-group">
+                    <label for="end_date">End Date</label>
+                    <input type="date" id="end_date" value="2024-12-31">
+                </div>
+
+                <div class="form-group">
+                    <label for="atr_multiplier">ATR Multiplier</label>
+                    <input type="number" id="atr_multiplier" step="0.1" min="0.1" max="10" value="1.5">
+                    <span class="info-text">Stop loss distance</span>
+                </div>
+            </div>
+
+            <button id="runBtn" class="btn-primary" onclick="runBacktest()">Run Backtest</button>
+        </div>
+
+        <div id="errorBox" class="error-box"></div>
+
+        <div id="results" class="results">
+            <div class="card">
+                <h2 class="section-title">Summary</h2>
+                <div id="summaryGrid" class="summary-grid"></div>
+            </div>
+
+            <div class="card">
+                <h2 class="section-title">Equity Curve</h2>
+                <div class="chart-container">
+                    <canvas id="equityChart"></canvas>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2 class="section-title">Trade History</h2>
+                <div id="tradeTable"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script>
+        let equityChart = null;
+
+        function showError(message) {
+            const errorBox = document.getElementById('errorBox');
+            errorBox.textContent = message;
+            errorBox.classList.add('show');
+        }
+
+        function hideError() {
+            document.getElementById('errorBox').classList.remove('show');
+        }
+
+        function showLoading(show) {
+            const btn = document.getElementById('runBtn');
+            if (show) {
+                btn.disabled = true;
+                btn.classList.add('loading');
+                btn.textContent = '';
+            } else {
+                btn.disabled = false;
+                btn.classList.remove('loading');
+                btn.textContent = 'Run Backtest';
+            }
+        }
+
+        function formatNumber(num, decimals = 2) {
+            if (Math.abs(num) >= 1000) {
+                return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+            }
+            return num.toFixed(decimals);
+        }
+
+        function renderSummary(summary) {
+            const grid = document.getElementById('summaryGrid');
+            const stats = [
+                { label: 'Total Trades', value: summary.total_trades },
+                { label: 'Win Rate', value: summary.win_rate + '%', class: summary.win_rate >= 50 ? 'positive' : 'negative' },
+                { label: 'Net Profit', value: formatNumber(summary.net_profit, 4), class: summary.net_profit >= 0 ? 'positive' : 'negative' },
+                { label: 'Avg Profit', value: formatNumber(summary.avg_profit, 4), class: summary.avg_profit >= 0 ? 'positive' : 'negative' },
+                { label: 'Max Drawdown', value: formatNumber(summary.max_drawdown, 4), class: 'negative' },
+                { label: 'Buy Trades', value: summary.buy_trades },
+                { label: 'Sell Trades', value: summary.sell_trades },
+                { label: 'Winning', value: summary.winning_trades, class: 'positive' },
+                { label: 'Losing', value: summary.losing_trades, class: 'negative' }
+            ];
+
+            grid.innerHTML = stats.map(stat => `
+                <div class="stat-box">
+                    <div class="label">${stat.label}</div>
+                    <div class="value ${stat.class || ''}">${stat.value}</div>
+                </div>
+            `).join('');
+        }
+
+        function renderEquityCurve(equityCurve) {
+            const ctx = document.getElementById('equityChart').getContext('2d');
+
+            if (equityChart) {
+                equityChart.destroy();
+            }
+
+            const labels = equityCurve.map(d => d.time);
+            const data = equityCurve.map(d => d.equity);
+
+            equityChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Equity',
+                        data: data,
+                        borderColor: '#1a1a2e',
+                        backgroundColor: 'rgba(26, 26, 46, 0.1)',
+                        fill: true,
+                        tension: 0.1,
+                        pointRadius: 2,
+                        pointHoverRadius: 5
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            callbacks: {
+                                label: function(context) {
+                                    return 'Equity: ' + formatNumber(context.parsed.y, 4);
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            ticks: {
+                                maxTicksLimit: 10,
+                                maxRotation: 45
+                            }
+                        },
+                        y: {
+                            display: true,
+                            ticks: {
+                                callback: function(value) {
+                                    return formatNumber(value, 2);
+                                }
+                            }
+                        }
+                    },
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
+                    }
+                }
+            });
+        }
+
+        function renderTrades(trades) {
+            const container = document.getElementById('tradeTable');
+
+            if (!trades || trades.length === 0) {
+                container.innerHTML = '<div class="no-trades">No trades generated with the current parameters.</div>';
+                return;
+            }
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Direction</th>
+                            <th>Entry Time</th>
+                            <th>Entry Price</th>
+                            <th>Exit Time</th>
+                            <th>Exit Price</th>
+                            <th>P&L</th>
+                            <th>P&L %</th>
+                            <th>Exit Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            trades.forEach((trade, idx) => {
+                const pnlClass = trade.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                const dirClass = trade.direction === 'BUY' ? 'trade-buy' : 'trade-sell';
+
+                html += `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td class="${dirClass}">${trade.direction}</td>
+                        <td>${trade.entry_time}</td>
+                        <td>${formatNumber(trade.entry_price, 5)}</td>
+                        <td>${trade.exit_time}</td>
+                        <td>${formatNumber(trade.exit_price, 5)}</td>
+                        <td class="${pnlClass}">${trade.pnl >= 0 ? '+' : ''}${formatNumber(trade.pnl, 4)}</td>
+                        <td class="${pnlClass}">${trade.pnl_pct >= 0 ? '+' : ''}${trade.pnl_pct}%</td>
+                        <td>${trade.exit_reason}</td>
+                    </tr>
+                `;
+            });
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        async function runBacktest() {
+            hideError();
+            document.getElementById('results').classList.remove('show');
+
+            const symbol = document.getElementById('symbol').value.trim();
+            const timeframe = document.getElementById('timeframe').value;
+            const startDate = document.getElementById('start_date').value;
+            const endDate = document.getElementById('end_date').value;
+            const atrMultiplier = document.getElementById('atr_multiplier').value;
+
+            // Client-side validation
+            if (!symbol) {
+                showError('Please enter a symbol.');
+                return;
+            }
+
+            if (!startDate || !endDate) {
+                showError('Please select both start and end dates.');
+                return;
+            }
+
+            if (startDate >= endDate) {
+                showError('End date must be after start date.');
+                return;
+            }
+
+            showLoading(true);
+
+            try {
+                const response = await fetch('/backtest', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        symbol: symbol,
+                        timeframe: timeframe,
+                        start_date: startDate,
+                        end_date: endDate,
+                        atr_multiplier: atrMultiplier
+                    })
+                });
+
+                const result = await response.json();
+
+                if (!response.ok || !result.success) {
+                    showError(result.error || 'An error occurred while running the backtest.');
+                    return;
+                }
+
+                renderSummary(result.summary);
+                renderEquityCurve(result.equity_curve);
+                renderTrades(result.trades);
+
+                document.getElementById('results').classList.add('show');
+
+            } catch (err) {
+                showError('Network error. Please check your connection and try again.');
+                console.error(err);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        // Set default dates
+        const today = new Date();
+        const oneYearAgo = new Date();
+        oneYearAgo.setFullYear(today.getFullYear() - 1);
+
+        document.getElementById('end_date').value = today.toISOString().split('T')[0];
+        document.getElementById('start_date').value = oneYearAgo.toISOString().split('T')[0];
+    </script>
+</body>
+</html>
