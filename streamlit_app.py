@@ -508,9 +508,9 @@ with st.sidebar:
     atr_multiplier = st.slider(
         "ATR Multiplier",
         min_value=0.5,
-        max_value=5.0,
+        max_value=10.0,
         value=1.5,
-        step=0.1,
+        step=0.5,
         help="Stop loss distance in ATR units"
     )
 
