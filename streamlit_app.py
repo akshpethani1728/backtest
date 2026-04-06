@@ -59,9 +59,11 @@ def calculate_indicators(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 5
     """Calculate EMA 20, EMA 50, and ATR indicators."""
     df = df.copy()
 
+    # Calculate EMAs (ewm handles NaN internally, first values remain NaN until enough data)
     df['EMA_Fast'] = df['Close'].ewm(span=ema_fast, adjust=False).mean()
     df['EMA_Slow'] = df['Close'].ewm(span=ema_slow, adjust=False).mean()
 
+    # Calculate ATR (True Range)
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -69,7 +71,18 @@ def calculate_indicators(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 5
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=atr_period).mean()
 
-    df = df.fillna(method='bfill').fillna(method='ffill')
+    # Drop rows with NaN in essential columns (EMA or ATR not yet available)
+    # Keep rows where Close > 0 and we have valid indicators
+    min_periods = max(ema_fast, ema_slow, atr_period)
+    df = df.iloc[min_periods:]  # Drop first min_periods rows where indicators are NaN
+    df = df.dropna(subset=['EMA_Fast', 'EMA_Slow', 'ATR'])
+
+    # Ensure no NaN in price columns
+    df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+
+    if df.empty:
+        raise ValueError("Not enough data to calculate indicators. Try a longer date range.")
+
     return df
 
 # =============================================================================
@@ -355,8 +368,15 @@ if run:
         st.stop()
 
     with st.spinner("Running backtest..."):
-        trades = run_backtest(df, atr_multiplier)
-        summary = calculate_summary(trades)
+        try:
+            trades = run_backtest(df, atr_multiplier)
+            summary = calculate_summary(trades)
+        except ValueError as e:
+            st.error(f"Calculation Error: {str(e)}")
+            st.stop()
+        except Exception as e:
+            st.error(f"Unexpected Error: {str(e)}")
+            st.stop()
 
     # Results
     st.markdown("---")
