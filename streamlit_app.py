@@ -1,15 +1,15 @@
 """
 Backtesting Application - Streamlit Version
-EMA Crossover with ATR Trailing Stop Loss Strategy
+EMA Crossover with ATR Trailing Stop Strategy
 """
 
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 import numpy as np
-from datetime import datetime
-import plotly.graph_objects as go
+from datetime import datetime, timedelta
 import plotly.express as px
+import plotly.graph_objects as go
 
 # =============================================================================
 # PAGE CONFIG
@@ -18,33 +18,130 @@ import plotly.express as px
 st.set_page_config(
     page_title="Backtesting Tool",
     page_icon="📈",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# Custom dark theme CSS
+st.markdown("""
+<style>
+    /* Main background */
+    .stApp {
+        background-color: #0e1117;
+    }
+
+    /* Sidebar background */
+    [data-testid="stSidebar"] {
+        background-color: #161b22;
+        border-right: 1px solid #30363d;
+    }
+
+    /* Text colors */
+    .stApp, .stApp p, .stApp span {
+        color: #c9d1d9;
+    }
+
+    /* Headers */
+    h1, h2, h3, h4 {
+        color: #ffffff !important;
+    }
+
+    /* Metric cards */
+    div[data-testid="metric-container"] {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 15px;
+    }
+
+    /* Metric value */
+    div[data-testid="metric-container"] label {
+        color: #8b949e !important;
+    }
+
+    div[data-testid="metric-container"] [data-testid="stMetricValue"] {
+        color: #ffffff !important;
+    }
+
+    /* Expander */
+    .streamlit-expanderHeader {
+        background-color: #161b22;
+        border-radius: 8px;
+    }
+
+    /* Tabs */
+    .stTabs [data-selected="true"] {
+        background-color: #238636;
+    }
+
+    /* Dataframe */
+    .dataframe {
+        background-color: #161b22 !important;
+    }
+
+    /* Success/positive values */
+    .positive {
+        color: #3fb950 !important;
+    }
+
+    /* Danger/negative values */
+    .negative {
+        color: #f85149 !important;
+    }
+
+    /* Hide hamburger menu */
+    #MainMenu {visibility: hidden;}
+
+    /* Footer */
+    footer {visibility: hidden;}
+
+    /* Custom divider */
+    hr {
+        border-color: #30363d;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # =============================================================================
 # DATA FETCHING
 # =============================================================================
 
 @st.cache_data(ttl=3600)
-def fetch_data(symbol: str, start_date: str, end_date: str, interval: str) -> pd.DataFrame:
-    """Fetch historical data from Yahoo Finance."""
+def fetch_data(symbol: str, period: str, interval: str) -> pd.DataFrame:
+    """Fetch historical data from Yahoo Finance using period parameter."""
     try:
         ticker = yf.Ticker(symbol)
-        df = ticker.history(start=start_date, end=end_date, interval=interval)
+
+        # Map interval to yfinance period (yfinance uses period for auto DateRange)
+        # period options: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
+        period_map = {
+            '1 Month': '1mo',
+            '3 Months': '3mo',
+            '6 Months': '6mo',
+            '1 Year': '1y',
+            'Max Available': '2y'  # Use 2y as reasonable max for most assets
+        }
+        yf_period = period_map.get(period, '1y')
+
+        df = ticker.history(period=yf_period, interval=interval)
 
         if df.empty:
-            raise ValueError(f"No data found for '{symbol}'. Check symbol and date range.")
+            raise ValueError(f"No data available for '{symbol}'. Try a different symbol or timeframe.")
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        required_cols = ['Open', 'High', 'Low', 'Close']
         for col in required_cols:
             if col not in df.columns:
-                raise ValueError(f"Missing column: {col}")
+                raise ValueError(f"Missing required data column: {col}")
 
+        # Drop rows with missing essential data
         df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
         df = df[df['Close'] > 0]
+
+        if df.empty:
+            raise ValueError(f"No valid data for '{symbol}'. Try a different symbol or timeframe.")
 
         return df
 
@@ -59,11 +156,9 @@ def calculate_indicators(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 5
     """Calculate EMA 20, EMA 50, and ATR indicators."""
     df = df.copy()
 
-    # Calculate EMAs (ewm handles NaN internally, first values remain NaN until enough data)
     df['EMA_Fast'] = df['Close'].ewm(span=ema_fast, adjust=False).mean()
     df['EMA_Slow'] = df['Close'].ewm(span=ema_slow, adjust=False).mean()
 
-    # Calculate ATR (True Range)
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -71,17 +166,12 @@ def calculate_indicators(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 5
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=atr_period).mean()
 
-    # Drop rows with NaN in essential columns (EMA or ATR not yet available)
-    # Keep rows where Close > 0 and we have valid indicators
     min_periods = max(ema_fast, ema_slow, atr_period)
-    df = df.iloc[min_periods:]  # Drop first min_periods rows where indicators are NaN
-    df = df.dropna(subset=['EMA_Fast', 'EMA_Slow', 'ATR'])
-
-    # Ensure no NaN in price columns
-    df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+    df = df.iloc[min_periods:]
+    df = df.dropna(subset=['EMA_Fast', 'EMA_Slow', 'ATR', 'Open', 'High', 'Low', 'Close'])
 
     if df.empty:
-        raise ValueError("Not enough data to calculate indicators. Try a longer date range.")
+        raise ValueError("Not enough data to calculate indicators. Try a different timeframe or period.")
 
     return df
 
@@ -90,9 +180,7 @@ def calculate_indicators(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 5
 # =============================================================================
 
 def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
-    """
-    Run backtesting engine with EMA crossover + ATR trailing stop strategy.
-    """
+    """Run backtesting engine with EMA crossover + ATR trailing stop strategy."""
     df = df.copy()
     df = calculate_indicators(df)
 
@@ -133,10 +221,10 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
             if curr_low <= atr_trailing_stop:
                 trades.append({
                     'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                    'entry_price': round(entry_price, 5),
                     'exit_time': idx.strftime('%Y-%m-%d %H:%M'),
-                    'exit_price': round(atr_trailing_stop, 5),
                     'direction': 'BUY',
+                    'entry_price': round(entry_price, 5),
+                    'exit_price': round(atr_trailing_stop, 5),
                     'pnl': round(atr_trailing_stop - entry_price, 5),
                     'pnl_pct': round(((atr_trailing_stop - entry_price) / entry_price) * 100, 2),
                     'exit_reason': 'Stop Loss'
@@ -148,10 +236,10 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
             elif curr_crossover_down and curr_close < curr_ema_fast and curr_close < curr_ema_slow:
                 trades.append({
                     'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                    'entry_price': round(entry_price, 5),
                     'exit_time': idx.strftime('%Y-%m-%d %H:%M'),
-                    'exit_price': round(curr_close, 5),
                     'direction': 'BUY',
+                    'entry_price': round(entry_price, 5),
+                    'exit_price': round(curr_close, 5),
                     'pnl': round(curr_close - entry_price, 5),
                     'pnl_pct': round(((curr_close - entry_price) / entry_price) * 100, 2),
                     'exit_reason': 'Opposite Signal'
@@ -168,10 +256,10 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
             if curr_high >= atr_trailing_stop:
                 trades.append({
                     'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                    'entry_price': round(entry_price, 5),
                     'exit_time': idx.strftime('%Y-%m-%d %H:%M'),
-                    'exit_price': round(atr_trailing_stop, 5),
                     'direction': 'SELL',
+                    'entry_price': round(entry_price, 5),
+                    'exit_price': round(atr_trailing_stop, 5),
                     'pnl': round(entry_price - atr_trailing_stop, 5),
                     'pnl_pct': round(((entry_price - atr_trailing_stop) / entry_price) * 100, 2),
                     'exit_reason': 'Stop Loss'
@@ -183,10 +271,10 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
             elif curr_crossover_up and curr_close > curr_ema_fast and curr_close > curr_ema_slow:
                 trades.append({
                     'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                    'entry_price': round(entry_price, 5),
                     'exit_time': idx.strftime('%Y-%m-%d %H:%M'),
-                    'exit_price': round(curr_close, 5),
                     'direction': 'SELL',
+                    'entry_price': round(entry_price, 5),
+                    'exit_price': round(curr_close, 5),
                     'pnl': round(entry_price - curr_close, 5),
                     'pnl_pct': round(((entry_price - curr_close) / entry_price) * 100, 2),
                     'exit_reason': 'Opposite Signal'
@@ -197,7 +285,6 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
 
         # === NEW ENTRY ===
         if position is None:
-            # BUY SIGNAL
             if curr_crossover_up and curr_close > curr_ema_fast and curr_close > curr_ema_slow:
                 in_pullback = True
                 pullback_crossover_idx = i
@@ -215,7 +302,6 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
                 elif curr_close < curr_ema_slow:
                     in_pullback = False
 
-            # SELL SIGNAL
             if position is None and curr_crossover_down and curr_close < curr_ema_fast and curr_close < curr_ema_slow:
                 in_pullback = True
                 pullback_crossover_idx = i
@@ -239,28 +325,18 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
     # Close open position at end
     if position is not None and len(df) > 0:
         last_close = df.iloc[-1]['Close']
-        if position == 'buy':
-            trades.append({
-                'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                'entry_price': round(entry_price, 5),
-                'exit_time': df.index[-1].strftime('%Y-%m-%d %H:%M'),
-                'exit_price': round(last_close, 5),
-                'direction': 'BUY',
-                'pnl': round(last_close - entry_price, 5),
-                'pnl_pct': round(((last_close - entry_price) / entry_price) * 100, 2),
-                'exit_reason': 'End of Data'
-            })
-        else:
-            trades.append({
-                'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                'entry_price': round(entry_price, 5),
-                'exit_time': df.index[-1].strftime('%Y-%m-%d %H:%M'),
-                'exit_price': round(last_close, 5),
-                'direction': 'SELL',
-                'pnl': round(entry_price - last_close, 5),
-                'pnl_pct': round(((entry_price - last_close) / entry_price) * 100, 2),
-                'exit_reason': 'End of Data'
-            })
+        direction = 'BUY' if position == 'buy' else 'SELL'
+        pnl = last_close - entry_price if position == 'buy' else entry_price - last_close
+        trades.append({
+            'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
+            'exit_time': df.index[-1].strftime('%Y-%m-%d %H:%M'),
+            'direction': direction,
+            'entry_price': round(entry_price, 5),
+            'exit_price': round(last_close, 5),
+            'pnl': round(pnl, 5),
+            'pnl_pct': round((pnl / entry_price) * 100, 2),
+            'exit_reason': 'End of Data'
+        })
 
     return trades
 
@@ -274,7 +350,8 @@ def calculate_summary(trades: list) -> dict:
         return {
             'total_trades': 0, 'win_rate': 0, 'net_profit': 0,
             'avg_profit': 0, 'max_drawdown': 0, 'buy_trades': 0,
-            'sell_trades': 0, 'winning_trades': 0, 'losing_trades': 0
+            'sell_trades': 0, 'winning_trades': 0, 'losing_trades': 0,
+            'largest_win': 0, 'largest_loss': 0
         }
 
     total = len(trades)
@@ -282,6 +359,7 @@ def calculate_summary(trades: list) -> dict:
     losses = [t for t in trades if t['pnl'] <= 0]
 
     net_profit = sum(t['pnl'] for t in trades)
+
     cumulative = 0
     peak = 0
     max_dd = 0
@@ -293,6 +371,9 @@ def calculate_summary(trades: list) -> dict:
         if drawdown > max_dd:
             max_dd = drawdown
 
+    largest_win = max([t['pnl'] for t in wins]) if wins else 0
+    largest_loss = min([t['pnl'] for t in losses]) if losses else 0
+
     return {
         'total_trades': total,
         'win_rate': round((len(wins) / total) * 100, 2) if total > 0 else 0,
@@ -302,136 +383,329 @@ def calculate_summary(trades: list) -> dict:
         'buy_trades': len([t for t in trades if t['direction'] == 'BUY']),
         'sell_trades': len([t for t in trades if t['direction'] == 'SELL']),
         'winning_trades': len(wins),
-        'losing_trades': len(losses)
+        'losing_trades': len(losses),
+        'largest_win': round(largest_win, 5),
+        'largest_loss': round(largest_loss, 5)
     }
 
 # =============================================================================
 # STREAMLIT UI
 # =============================================================================
 
+# Header
 st.title("📈 Backtesting Tool")
 st.caption("EMA Crossover + ATR Trailing Stop Strategy")
 
-# Sidebar inputs
-st.sidebar.header("Settings")
+# =============================================================================
+# SIDEBAR
+# =============================================================================
 
-symbol = st.sidebar.text_input("Symbol", value="EURUSD=X", help="Yahoo Finance format: EURUSD=X, BTC-USD, AAPL")
-timeframe = st.sidebar.selectbox("Timeframe", ["15m", "1h", "1d"], index=1)
+with st.sidebar:
+    st.header("⚙️ Settings")
 
-today = datetime.today()
-default_start = datetime(today.year - 1, today.month, today.day)
+    # Symbol selection
+    st.subheader("Symbol")
+    symbol_options = {
+        'EUR/USD': 'EURUSD=X',
+        'GBP/USD': 'GBPUSD=X',
+        'BTC/USD': 'BTC-USD',
+        'Apple': 'AAPL'
+    }
+    symbol_display = st.selectbox(
+        "Select Asset",
+        options=list(symbol_options.keys()),
+        index=0,
+        help="Choose from popular forex, crypto, or stock symbols"
+    )
+    symbol = symbol_options[symbol_display]
 
-start_date = st.sidebar.date_input("Start Date", value=default_start)
-end_date = st.sidebar.date_input("End Date", value=today)
+    st.divider()
 
-atr_multiplier = st.sidebar.number_input("ATR Multiplier", min_value=0.1, max_value=10.0, value=1.5, step=0.1)
+    # Timeframe
+    st.subheader("Timeframe")
+    timeframe = st.selectbox(
+        "Data Interval",
+        options=['15m', '1h', '1d'],
+        index=1,
+        help="15m = 15 minutes, 1h = 1 hour, 1d = 1 day"
+    )
 
-# Example symbols
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Example Symbols:**")
-st.sidebar.markdown("""
-- Forex: `EURUSD=X`, `GBPUSD=X`
-- Crypto: `BTC-USD`, `ETH-USD`
-- Stocks: `AAPL`, `TSLA`
-""")
+    st.divider()
 
-# Run button
-run = st.sidebar.button("🚀 Run Backtest", type="primary", use_container_width=True)
+    # Period
+    st.subheader("Date Range")
+    period = st.selectbox(
+        "Period",
+        options=['1 Month', '3 Months', '6 Months', '1 Year', 'Max Available'],
+        index=3,
+        help="How much historical data to fetch"
+    )
+
+    st.divider()
+
+    # ATR Multiplier
+    st.subheader("Risk Management")
+    atr_multiplier = st.slider(
+        "ATR Multiplier",
+        min_value=0.5,
+        max_value=5.0,
+        value=1.5,
+        step=0.1,
+        help="Stop loss distance in ATR units. Higher = wider stop."
+    )
+
+    st.divider()
+
+    # Run button
+    run = st.button("🚀 Run Backtest", type="primary", use_container_width=True)
+
+# =============================================================================
+# MAIN CONTENT
+# =============================================================================
 
 if run:
-    # Validation
-    if not symbol.strip():
-        st.error("Please enter a symbol.")
-        st.stop()
-
-    if start_date >= end_date:
-        st.error("End date must be after start date.")
-        st.stop()
-
-    delta = (end_date - start_date).days
-    if timeframe == '15m' and delta > 60:
-        st.error("For 15m data, date range cannot exceed 60 days.")
-        st.stop()
-    elif timeframe == '1h' and delta > 730:
-        st.error("For hourly data, date range cannot exceed 2 years.")
-        st.stop()
-
-    with st.spinner("Fetching data..."):
+    # Fetch data
+    with st.spinner(f"Fetching {symbol_display} data..."):
         try:
-            df = fetch_data(symbol, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), timeframe)
+            df = fetch_data(symbol, period, timeframe)
+        except ValueError as e:
+            st.error(f"❌ {str(e)}")
+            st.stop()
         except Exception as e:
-            st.error(f"Data Error: {str(e)}")
+            st.error(f"❌ Failed to fetch data: {str(e)}")
             st.stop()
 
-    if len(df) < 100:
-        st.error(f"Not enough data. Got {len(df)} candles. Need at least 100.")
+    if len(df) < 50:
+        st.error(f"❌ Not enough data. Got {len(df)} candles. Try a longer period or different timeframe.")
         st.stop()
 
+    # Run backtest
     with st.spinner("Running backtest..."):
         try:
             trades = run_backtest(df, atr_multiplier)
             summary = calculate_summary(trades)
         except ValueError as e:
-            st.error(f"Calculation Error: {str(e)}")
+            st.error(f"❌ {str(e)}")
             st.stop()
         except Exception as e:
-            st.error(f"Unexpected Error: {str(e)}")
+            st.error(f"❌ Backtest error: {str(e)}")
             st.stop()
 
-    # Results
-    st.markdown("---")
-    st.subheader("📊 Summary")
+    # Display info
+    st.info(f"📊 Analyzed {len(df)} candles from {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')} | Symbol: {symbol_display} | Timeframe: {timeframe}")
 
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Total Trades", summary['total_trades'])
-    col2.metric("Win Rate", f"{summary['win_rate']}%", delta_color="normal" if summary['win_rate'] >= 50 else "inverse")
-    col3.metric("Net Profit", f"{summary['net_profit']:.5f}", delta_color="normal" if summary['net_profit'] >= 0 else "inverse")
-    col4.metric("Avg Profit", f"{summary['avg_profit']:.5f}")
-    col5.metric("Max Drawdown", f"{summary['max_drawdown']:.5f}")
+    st.divider()
 
-    col6, col7, col8, col9 = st.columns(4)
-    col6.metric("Buy Trades", summary['buy_trades'])
-    col7.metric("Sell Trades", summary['sell_trades'])
-    col8.metric("Winning", summary['winning_trades'])
-    col9.metric("Losing", summary['losing_trades'])
+    # =============================================================================
+    # METRIC CARDS
+    # =============================================================================
 
-    # Equity Curve
+    st.subheader("📊 Performance Summary")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    # Total Trades
+    col1.metric(
+        "Total Trades",
+        summary['total_trades'],
+        help="Total number of completed trades"
+    )
+
+    # Win Rate
+    win_rate_delta = summary['win_rate'] - 50
+    col2.metric(
+        "Win Rate",
+        f"{summary['win_rate']}%",
+        delta=f"{'+' if win_rate_delta >= 0 else ''}{win_rate_delta}%" if summary['total_trades'] > 0 else None,
+        delta_color="normal" if summary['win_rate'] >= 50 else "inverse",
+        help="Percentage of winning trades"
+    )
+
+    # Net Profit
+    profit_color = "normal" if summary['net_profit'] >= 0 else "inverse"
+    col3.metric(
+        "Net Profit",
+        f"{summary['net_profit']:.5f}",
+        delta_color=profit_color,
+        help="Total profit/loss across all trades"
+    )
+
+    # Max Drawdown
+    col4.metric(
+        "Max Drawdown",
+        f"{summary['max_drawdown']:.5f}",
+        delta_color="inverse",
+        help="Largest peak-to-trough decline"
+    )
+
+    col5, col6, col7, col8 = st.columns(4)
+
+    col5.metric("Buy Trades", summary['buy_trades'])
+    col6.metric("Sell Trades", summary['sell_trades'])
+    col7.metric("Winning", summary['winning_trades'], delta_color="normal")
+    col8.metric("Losing", summary['losing_trades'], delta_color="inverse")
+
+    st.divider()
+
+    # =============================================================================
+    # EQUITY CURVE
+    # =============================================================================
+
+    st.subheader("📈 Equity Curve")
+
     if trades:
-        st.markdown("---")
-        st.subheader("📈 Equity Curve")
-
         equity_curve = []
         cumulative = 0
         for trade in trades:
             cumulative += trade['pnl']
-            equity_curve.append({'time': trade['exit_time'], 'equity': cumulative})
+            equity_curve.append({
+                'time': trade['exit_time'],
+                'equity': cumulative,
+                'trade': f"{trade['direction']} #{len(equity_curve) + 1}"
+            })
 
         equity_df = pd.DataFrame(equity_curve)
 
-        fig = px.line(equity_df, x='time', y='equity', title='Cumulative P&L',
-                      labels={'time': 'Date', 'equity': 'Equity'})
-        fig.update_layout(template='plotly_white', hovermode='x unified')
-        fig.update_traces(line_color='#1a1a2e', line_width=2)
-        st.plotly_chart(fig, use_container_width=True)
+        # Create Plotly chart
+        fig = go.Figure()
 
-    # Trade Table
-    if trades:
-        st.markdown("---")
-        st.subheader("📋 Trade History")
+        # Add equity line
+        fig.add_trace(go.Scatter(
+            x=equity_df['time'],
+            y=equity_df['equity'],
+            mode='lines',
+            name='Equity',
+            line=dict(color='#58a6ff', width=2),
+            fill='tozeroy',
+            fillcolor='rgba(88, 166, 255, 0.1)'
+        ))
 
-        trades_df = pd.DataFrame(trades)
-        trades_df.index = range(1, len(trades_df) + 1)
-        trades_df.index.name = '#'
+        # Add markers for trades
+        colors = ['#3fb950' if e >= 0 else '#f85149' for e in equity_df['equity']]
+        fig.add_trace(go.Scatter(
+            x=equity_df['time'],
+            y=equity_df['equity'],
+            mode='markers',
+            name='Trade',
+            marker=dict(color=colors, size=8),
+            hoverinfo='text',
+            hovertext=[f"Trade {i+1}: {e:.5f}" for i, e in enumerate(equity_df['equity'])]
+        ))
 
-        st.dataframe(
-            trades_df.style.applymap(
-                lambda x: 'color: #28a745' if isinstance(x, (int, float)) and x > 0 else ('color: #dc3545' if isinstance(x, (int, float)) and x < 0 else ''),
-                subset=['pnl', 'pnl_pct']
+        fig.update_layout(
+            template='plotly_dark',
+            hovermode='x unified',
+            xaxis_title='Date',
+            yaxis_title='Cumulative P&L',
+            height=400,
+            margin=dict(l=0, r=0, t=30, b=0),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(
+                gridcolor='#30363d',
+                showgrid=True
             ),
-            use_container_width=True
+            yaxis=dict(
+                gridcolor='#30363d',
+                showgrid=True
+            )
         )
+
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No trades generated with the current parameters.")
 
+    st.divider()
+
+    # =============================================================================
+    # TRADE HISTORY
+    # =============================================================================
+
+    st.subheader("📋 Trade History")
+
+    if trades:
+        trades_df = pd.DataFrame(trades)
+
+        # Add row numbers
+        trades_df.insert(0, '#', range(1, len(trades_df) + 1))
+
+        # Style function for dataframe
+        def style_pnl(val):
+            if isinstance(val, (int, float)):
+                if val > 0:
+                    return 'color: #3fb950'
+                elif val < 0:
+                    return 'color: #f85149'
+            return ''
+
+        def style_direction(val):
+            if val == 'BUY':
+                return 'color: #3fb950; font-weight: bold'
+            elif val == 'SELL':
+                return 'color: #f85149; font-weight: bold'
+            return ''
+
+        # Apply styling
+        styled_df = trades_df.style.applymap(style_pnl, subset=['pnl', 'pnl_pct'])
+        styled_df = styled_df.applymap(style_direction, subset=['direction'])
+
+        st.dataframe(
+            styled_df,
+            use_container_width=True,
+            hide_index=True,
+            height=400
+        )
+
+        # Download CSV
+        csv = trades_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Trade History (CSV)",
+            data=csv,
+            file_name=f"backtest_{symbol.replace('=', '_').replace('-', '_')}_{timeframe}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("No trades to display.")
+
 else:
+    # Initial state - show instructions
+    st.divider()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("🎯 Strategy")
+        st.markdown("""
+        **Entry Rules (Buy):**
+        1. EMA 20 crosses above EMA 50
+        2. Price closes above both EMAs
+        3. Wait for pullback to EMA 20
+        4. Enter on confirmation candle
+
+        **Entry Rules (Sell):**
+        1. EMA 20 crosses below EMA 50
+        2. Price closes below both EMAs
+        3. Wait for pullback to EMA 20
+        4. Enter on confirmation candle
+
+        **Exit Rules:**
+        - ATR trailing stop (moves only in profit direction)
+        - Stop loss hit OR opposite signal appears
+        """)
+
+    with col2:
+        st.subheader("📌 Available Symbols")
+        st.markdown("""
+        | Asset | Symbol |
+        |-------|--------|
+        | EUR/USD | EURUSD=X |
+        | GBP/USD | GBPUSD=X |
+        | BTC/USD | BTC-USD |
+        | Apple | AAPL |
+
+        *More symbols coming soon...*
+        """)
+
+    st.divider()
+
     st.info("👈 Configure settings in the sidebar and click **Run Backtest** to start.")
