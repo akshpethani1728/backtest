@@ -1,6 +1,6 @@
 """
 Backtesting Application - EMA Crossover + ATR Trailing Stop
-Clean, stable, production-ready version
+Enhanced with P&L in currency, more pairs, and autocomplete
 """
 
 import streamlit as st
@@ -36,16 +36,69 @@ st.markdown("""
     }
     div[data-testid="metric-container"] label { color: #8b949e !important; }
     div[data-testid="metric-container"] [data-testid="stMetricValue"] { color: #ffffff !important; }
-    .stTabs [data-selected="true"] { background-color: #238636; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     hr {border-color: #30363d;}
-    .trade-buy {color: #3fb950; font-weight: 600;}
-    .trade-sell {color: #f85149; font-weight: 600;}
-    .pnl-positive {color: #3fb950;}
-    .pnl-negative {color: #f85149;}
 </style>
 """, unsafe_allow_html=True)
+
+# =============================================================================
+# SYMBOLS DATABASE
+# =============================================================================
+
+# Popular trading symbols organized by category
+SYMBOLS = {
+    'Forex': {
+        'EUR/USD': 'EURUSD=X',
+        'GBP/USD': 'GBPUSD=X',
+        'USD/JPY': 'USDJPY=X',
+        'USD/CHF': 'USDCHF=X',
+        'AUD/USD': 'AUDUSD=X',
+        'USD/CAD': 'USDCAD=X',
+        'NZD/USD': 'NZDUSD=X',
+        'EUR/GBP': 'EURGBP=X',
+        'EUR/JPY': 'EURJPY=X',
+        'GBP/JPY': 'GBPJPY=X',
+        'AUD/JPY': 'AUDJPY=X',
+        'EUR/CHF': 'EURCHF=X',
+    },
+    'Crypto': {
+        'BTC/USD': 'BTC-USD',
+        'ETH/USD': 'ETH-USD',
+        'SOL/USD': 'SOL-USD',
+        'BNB/USD': 'BNB-USD',
+        'XRP/USD': 'XRP-USD',
+        'ADA/USD': 'ADA-USD',
+        'DOGE/USD': 'DOGE-USD',
+        'DOT/USD': 'DOT-USD',
+        'AVAX/USD': 'AVAX-USD',
+        'LINK/USD': 'LINK-USD',
+        'MATIC/USD': 'MATIC-USD',
+        'LTC/USD': 'LTC-USD',
+    },
+    'Stocks': {
+        'Apple': 'AAPL',
+        'Tesla': 'TSLA',
+        'Microsoft': 'MSFT',
+        'Google': 'GOOGL',
+        'Amazon': 'AMZN',
+        'NVIDIA': 'NVDA',
+        'Meta': 'META',
+        'Netflix': 'NFLX',
+        'AMD': 'AMD',
+        'Intel': 'INTC',
+        'Gold': 'GC=F',
+        'Oil': 'CL=F',
+    }
+}
+
+# Build flat symbol map for autocomplete
+ALL_SYMBOLS = {}
+for category, pairs in SYMBOLS.items():
+    for name, symbol in pairs.items():
+        ALL_SYMBOLS[name] = symbol
+
+SORTED_SYMBOLS = sorted(ALL_SYMBOLS.keys())
 
 # =============================================================================
 # DATA FETCHING
@@ -53,7 +106,7 @@ st.markdown("""
 
 @st.cache_data(ttl=3600)
 def fetch_data(symbol: str, period: str, interval: str) -> pd.DataFrame:
-    """Fetch historical data using yfinance period parameter."""
+    """Fetch historical data using yfinance."""
     try:
         period_map = {
             '1 Month': '1mo',
@@ -70,17 +123,14 @@ def fetch_data(symbol: str, period: str, interval: str) -> pd.DataFrame:
         if df is None or df.empty:
             raise ValueError(f"No data available for '{symbol}'. Check the symbol.")
 
-        # Flatten multi-index columns if needed
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Ensure required columns exist
         required = ['Open', 'High', 'Low', 'Close']
         for col in required:
             if col not in df.columns:
                 raise ValueError(f"Missing column: {col}")
 
-        # Clean data
         df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
         df = df[df['Close'] > 0]
 
@@ -102,27 +152,49 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate EMA 20, EMA 50, and ATR."""
     df = df.copy()
 
-    # EMAs
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
     df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
 
-    # ATR (True Range)
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=14).mean()
 
-    # Drop rows where indicators are NaN (first ~50 rows)
     df = df.dropna(subset=['EMA_20', 'EMA_50', 'ATR'])
-
-    # Final clean
     df = df[['Open', 'High', 'Low', 'Close', 'EMA_20', 'EMA_50', 'ATR']]
 
     if df.empty or len(df) < 10:
-        raise ValueError("Not enough data after indicator calculation. Try a longer period.")
+        raise ValueError("Not enough data. Try a longer period.")
 
     return df
+
+# =============================================================================
+# P&L CALCULATION
+# =============================================================================
+
+def calculate_pnl_money(pnl_points: float, symbol: str, lot_size: float) -> float:
+    """
+    Calculate P&L in currency based on lot size.
+
+    Forex: 1 lot = 100,000 units, 0.1 lot = 10,000 units
+    Crypto: 1 lot = 1 coin, 0.1 lot = 0.1 coin
+    Stocks: 1 lot = 100 shares (approximation)
+
+    For simplicity, we use: P&L (money) = P&L (points) * lot_size * 10000
+    This works reasonably for forex pairs where price is around 1-150
+    """
+    # Check if crypto (has dash in symbol)
+    if '-' in symbol and symbol.endswith('-USD'):
+        # Crypto: 1 lot = 1 coin
+        return pnl_points * lot_size
+    elif '=' in symbol:
+        # Forex: 1 lot = 100,000 units, 0.1 lot = 10,000 units
+        # P&L in currency = P&L points * 10,000 * lot_size
+        return pnl_points * 10000 * lot_size
+    else:
+        # Stocks: approximate as shares
+        return pnl_points * 100 * lot_size
 
 # =============================================================================
 # BACKTEST ENGINE
@@ -130,18 +202,12 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
     """
-    Run backtest with simple EMA crossover strategy.
-
-    Entry:
-    - BUY when EMA_20 crosses ABOVE EMA_50
-    - SELL when EMA_20 crosses BELOW EMA_50
-
-    Exit:
-    - ATR trailing stop (moves only in profit direction)
-    - OR opposite crossover
+    Run backtest with EMA crossover strategy.
+    Entry: BUY when EMA_20 crosses ABOVE EMA_50, SELL when crosses BELOW
+    Exit: ATR trailing stop OR opposite crossover
     """
     trades = []
-    position = None  # None, 'buy', 'sell'
+    position = None
     entry_price = 0
     entry_time = None
     atr_stop = 0
@@ -157,87 +223,75 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
         curr_low = row['Low']
         curr_atr = row['ATR']
 
-        # Skip if indicators not ready
         if pd.isna(curr_ema20) or pd.isna(curr_ema50) or pd.isna(curr_atr):
             prev_ema20 = curr_ema20
             prev_ema50 = curr_ema50
             continue
 
-        # Skip first iteration
         if prev_ema20 is None or prev_ema50 is None:
             prev_ema20 = curr_ema20
             prev_ema50 = curr_ema50
             continue
 
-        # === CLOSE EXISTING POSITION ===
+        # === CLOSE POSITION ===
         if position == 'buy':
-            # Update ATR trailing stop (only moves UP)
             new_stop = curr_close - (atr_multiplier * curr_atr)
             if new_stop > atr_stop:
                 atr_stop = new_stop
 
-            # Check stop hit
             if curr_low <= atr_stop:
                 trades.append({
                     'num': len(trades) + 1,
                     'direction': 'BUY',
-                    'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                    'entry_price': round(entry_price, 5),
-                    'exit_time': idx.strftime('%Y-%m-%d %H:%M'),
-                    'exit_price': round(atr_stop, 5),
-                    'pnl': round(atr_stop - entry_price, 5),
-                    'pnl_pct': round(((atr_stop - entry_price) / entry_price) * 100, 2),
+                    'entry_time': entry_time,
+                    'entry_price': entry_price,
+                    'exit_time': idx,
+                    'exit_price': atr_stop,
+                    'pnl_points': atr_stop - entry_price,
                     'exit_reason': 'Stop Loss'
                 })
                 position = None
 
-            # Check opposite crossover (sell signal)
             elif prev_ema20 >= prev_ema50 and curr_ema20 < curr_ema50:
                 trades.append({
                     'num': len(trades) + 1,
                     'direction': 'BUY',
-                    'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                    'entry_price': round(entry_price, 5),
-                    'exit_time': idx.strftime('%Y-%m-%d %H:%M'),
-                    'exit_price': round(curr_close, 5),
-                    'pnl': round(curr_close - entry_price, 5),
-                    'pnl_pct': round(((curr_close - entry_price) / entry_price) * 100, 2),
+                    'entry_time': entry_time,
+                    'entry_price': entry_price,
+                    'exit_time': idx,
+                    'exit_price': curr_close,
+                    'pnl_points': curr_close - entry_price,
                     'exit_reason': 'Opposite Signal'
                 })
                 position = None
 
         elif position == 'sell':
-            # Update ATR trailing stop (only moves DOWN)
             new_stop = curr_close + (atr_multiplier * curr_atr)
             if new_stop < atr_stop:
                 atr_stop = new_stop
 
-            # Check stop hit
             if curr_high >= atr_stop:
                 trades.append({
                     'num': len(trades) + 1,
                     'direction': 'SELL',
-                    'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                    'entry_price': round(entry_price, 5),
-                    'exit_time': idx.strftime('%Y-%m-%d %H:%M'),
-                    'exit_price': round(atr_stop, 5),
-                    'pnl': round(entry_price - atr_stop, 5),
-                    'pnl_pct': round(((entry_price - atr_stop) / entry_price) * 100, 2),
+                    'entry_time': entry_time,
+                    'entry_price': entry_price,
+                    'exit_time': idx,
+                    'exit_price': atr_stop,
+                    'pnl_points': entry_price - atr_stop,
                     'exit_reason': 'Stop Loss'
                 })
                 position = None
 
-            # Check opposite crossover (buy signal)
             elif prev_ema20 <= prev_ema50 and curr_ema20 > curr_ema50:
                 trades.append({
                     'num': len(trades) + 1,
                     'direction': 'SELL',
-                    'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                    'entry_price': round(entry_price, 5),
-                    'exit_time': idx.strftime('%Y-%m-%d %H:%M'),
-                    'exit_price': round(curr_close, 5),
-                    'pnl': round(entry_price - curr_close, 5),
-                    'pnl_pct': round(((entry_price - curr_close) / entry_price) * 100, 2),
+                    'entry_time': entry_time,
+                    'entry_price': entry_price,
+                    'exit_time': idx,
+                    'exit_price': curr_close,
+                    'pnl_points': entry_price - curr_close,
                     'exit_reason': 'Opposite Signal'
                 })
                 position = None
@@ -261,34 +315,31 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
         prev_ema20 = curr_ema20
         prev_ema50 = curr_ema50
 
-    # Close open position at end of data
+    # Close open position
     if position is not None and len(df) > 0:
-        last_row = df.iloc[-1]
-        last_close = last_row['Close']
+        last_close = df.iloc[-1]['Close']
         last_time = df.index[-1]
 
         if position == 'buy':
             trades.append({
                 'num': len(trades) + 1,
                 'direction': 'BUY',
-                'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                'entry_price': round(entry_price, 5),
-                'exit_time': last_time.strftime('%Y-%m-%d %H:%M'),
-                'exit_price': round(last_close, 5),
-                'pnl': round(last_close - entry_price, 5),
-                'pnl_pct': round(((last_close - entry_price) / entry_price) * 100, 2),
+                'entry_time': entry_time,
+                'entry_price': entry_price,
+                'exit_time': last_time,
+                'exit_price': last_close,
+                'pnl_points': last_close - entry_price,
                 'exit_reason': 'End of Data'
             })
         else:
             trades.append({
                 'num': len(trades) + 1,
                 'direction': 'SELL',
-                'entry_time': entry_time.strftime('%Y-%m-%d %H:%M'),
-                'entry_price': round(entry_price, 5),
-                'exit_time': last_time.strftime('%Y-%m-%d %H:%M'),
-                'exit_price': round(last_close, 5),
-                'pnl': round(entry_price - last_close, 5),
-                'pnl_pct': round(((entry_price - last_close) / entry_price) * 100, 2),
+                'entry_time': entry_time,
+                'entry_price': entry_price,
+                'exit_time': last_time,
+                'exit_price': last_close,
+                'pnl_points': entry_price - last_close,
                 'exit_reason': 'End of Data'
             })
 
@@ -298,56 +349,89 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
 # SUMMARY CALCULATION
 # =============================================================================
 
-def calculate_summary(trades: list) -> dict:
-    """Calculate summary statistics from trades."""
+def calculate_summary(trades: list, symbol: str, lot_size: float) -> dict:
+    """Calculate comprehensive summary statistics."""
     if not trades:
         return {
-            'total_trades': 0,
-            'win_rate': 0,
-            'net_profit': 0,
-            'avg_profit': 0,
-            'max_drawdown': 0,
-            'buy_trades': 0,
-            'sell_trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'largest_win': 0,
-            'largest_loss': 0
+            'total_trades': 0, 'win_rate': 0,
+            'net_profit_points': 0, 'net_profit_money': 0,
+            'gross_profit': 0, 'gross_loss': 0,
+            'avg_profit': 0, 'avg_win': 0, 'avg_loss': 0,
+            'max_drawdown': 0, 'max_consecutive_losses': 0,
+            'buy_trades': 0, 'sell_trades': 0,
+            'winning_trades': 0, 'losing_trades': 0,
+            'largest_win': 0, 'largest_loss': 0,
+            'profit_factor': 0, 'expectancy': 0
         }
 
     total = len(trades)
-    winning = [t for t in trades if t['pnl'] > 0]
-    losing = [t for t in trades if t['pnl'] <= 0]
+    winning = [t for t in trades if t['pnl_points'] > 0]
+    losing = [t for t in trades if t['pnl_points'] <= 0]
 
-    net_profit = sum(t['pnl'] for t in trades)
+    # P&L in points
+    net_profit_points = sum(t['pnl_points'] for t in trades)
+    gross_profit = sum(t['pnl_points'] for t in winning)
+    gross_loss = abs(sum(t['pnl_points'] for t in losing))
+
+    # P&L in money
+    net_profit_money = calculate_pnl_money(net_profit_points, symbol, lot_size)
+    gross_profit_money = calculate_pnl_money(gross_profit, symbol, lot_size) if gross_profit > 0 else 0
+    gross_loss_money = calculate_pnl_money(gross_loss, symbol, lot_size)
 
     # Max drawdown
     cumulative = 0
     peak = 0
     max_dd = 0
     for t in trades:
-        cumulative += t['pnl']
+        cumulative += t['pnl_points']
         if cumulative > peak:
             peak = cumulative
         dd = peak - cumulative
         if dd > max_dd:
             max_dd = dd
 
-    largest_win = max([t['pnl'] for t in winning]) if winning else 0
-    largest_loss = min([t['pnl'] for t in losing]) if losing else 0
+    # Max consecutive losses
+    max_consec = 0
+    current_consec = 0
+    for t in trades:
+        if t['pnl_points'] <= 0:
+            current_consec += 1
+            max_consec = max(max_consec, current_consec)
+        else:
+            current_consec = 0
+
+    # Stats
+    largest_win = max([t['pnl_points'] for t in winning]) if winning else 0
+    largest_loss = min([t['pnl_points'] for t in losing]) if losing else 0
+    avg_win = gross_profit / len(winning) if winning else 0
+    avg_loss = gross_loss / len(losing) if losing else 0
+
+    # Profit factor
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf') if gross_profit > 0 else 0
+
+    # Expectancy
+    expectancy = net_profit_points / total if total > 0 else 0
 
     return {
         'total_trades': total,
         'win_rate': round((len(winning) / total) * 100, 2) if total > 0 else 0,
-        'net_profit': round(net_profit, 5),
-        'avg_profit': round(net_profit / total, 5) if total > 0 else 0,
+        'net_profit_points': round(net_profit_points, 5),
+        'net_profit_money': round(net_profit_money, 2),
+        'gross_profit': round(gross_profit, 5),
+        'gross_loss': round(gross_loss, 5),
+        'avg_profit': round(net_profit_points / total, 5) if total > 0 else 0,
+        'avg_win': round(avg_win, 5),
+        'avg_loss': round(avg_loss, 5),
         'max_drawdown': round(max_dd, 5),
+        'max_consecutive_losses': max_consec,
         'buy_trades': len([t for t in trades if t['direction'] == 'BUY']),
         'sell_trades': len([t for t in trades if t['direction'] == 'SELL']),
         'winning_trades': len(winning),
         'losing_trades': len(losing),
         'largest_win': round(largest_win, 5),
-        'largest_loss': round(largest_loss, 5)
+        'largest_loss': round(largest_loss, 5),
+        'profit_factor': round(profit_factor, 2) if profit_factor != float('inf') else '∞',
+        'expectancy': round(expectancy, 5)
     }
 
 # =============================================================================
@@ -355,7 +439,7 @@ def calculate_summary(trades: list) -> dict:
 # =============================================================================
 
 st.title("📈 Backtesting Tool")
-st.caption("EMA Crossover + ATR Trailing Stop")
+st.caption("EMA Crossover + ATR Trailing Stop Strategy")
 
 # =============================================================================
 # SIDEBAR
@@ -364,20 +448,28 @@ st.caption("EMA Crossover + ATR Trailing Stop")
 with st.sidebar:
     st.header("⚙️ Settings")
 
-    # Symbol
+    # Symbol selection with "Other" option
     st.subheader("Symbol")
-    symbol_map = {
-        'EUR/USD': 'EURUSD=X',
-        'GBP/USD': 'GBPUSD=X',
-        'BTC/USD': 'BTC-USD',
-        'AAPL': 'AAPL'
-    }
-    symbol_key = st.selectbox(
-        "Asset",
-        options=list(symbol_map.keys()),
-        index=0
-    )
-    symbol = symbol_map[symbol_key]
+
+    symbol_options = ['Select...'] + SORTED_SYMBOLS + ['Other (Custom)']
+    selected_display = st.selectbox("Asset", options=symbol_options, index=0)
+
+    symbol = None
+    custom_symbol = None
+
+    if selected_display == 'Other (Custom)':
+        custom_symbol = st.text_input(
+            "Enter Symbol",
+            value="",
+            placeholder="e.g., EURUSD=X, BTC-USD",
+            help="Enter Yahoo Finance symbol"
+        )
+        if custom_symbol:
+            symbol = custom_symbol
+            st.caption(f"Using: {symbol}")
+    elif selected_display != 'Select...':
+        symbol = ALL_SYMBOLS.get(selected_display)
+        st.caption(f"Symbol: {symbol}")
 
     st.divider()
 
@@ -385,8 +477,8 @@ with st.sidebar:
     st.subheader("Timeframe")
     timeframe = st.selectbox(
         "Interval",
-        options=['15m', '1h', '1d'],
-        index=1
+        options=['5m', '15m', '1h', '1d'],
+        index=2
     )
 
     st.divider()
@@ -401,14 +493,25 @@ with st.sidebar:
 
     st.divider()
 
-    # ATR Multiplier
+    # Risk Management
     st.subheader("Risk Management")
+
+    lot_size = st.number_input(
+        "Lot Size",
+        min_value=0.01,
+        max_value=100.0,
+        value=0.1,
+        step=0.01,
+        help="Trading lot size (0.1 = 10,000 units for forex)"
+    )
+
     atr_multiplier = st.slider(
         "ATR Multiplier",
         min_value=0.5,
         max_value=5.0,
         value=1.5,
-        step=0.1
+        step=0.1,
+        help="Stop loss distance in ATR units"
     )
 
     st.divider()
@@ -420,8 +523,13 @@ with st.sidebar:
 # =============================================================================
 
 if run:
+    # Validate symbol
+    if not symbol:
+        st.error("❌ Please select or enter a symbol.")
+        st.stop()
+
     # Fetch data
-    with st.spinner(f"Fetching {symbol_key} data..."):
+    with st.spinner(f"Fetching data for {symbol}..."):
         try:
             df = fetch_data(symbol, period, timeframe)
         except ValueError as e:
@@ -453,7 +561,7 @@ if run:
     with st.spinner("Running backtest..."):
         try:
             trades = run_backtest(df, atr_multiplier)
-            summary = calculate_summary(trades)
+            summary = calculate_summary(trades, symbol, lot_size)
         except Exception as e:
             st.error(f"❌ Backtest error: {str(e)}")
             st.stop()
@@ -461,36 +569,127 @@ if run:
     # Data info
     start_dt = df.index[0].strftime('%Y-%m-%d') if len(df) > 0 else 'N/A'
     end_dt = df.index[-1].strftime('%Y-%m-%d') if len(df) > 0 else 'N/A'
-    st.info(f"📊 {len(df)} candles | {start_dt} to {end_dt} | {symbol_key} ({timeframe})")
+    display_name = selected_display if selected_display != 'Other (Custom)' else custom_symbol
+
+    st.info(f"📊 {len(df)} candles | {start_dt} to {end_dt} | {display_name} ({timeframe}) | Lot Size: {lot_size}")
 
     st.divider()
 
     # =============================================================================
-    # METRICS
+    # METRICS - ROW 1 (Main)
     # =============================================================================
 
     st.subheader("📊 Performance Summary")
 
     m1, m2, m3, m4 = st.columns(4)
 
-    m1.metric("Total Trades", summary['total_trades'])
+    m1.metric(
+        "Total Trades",
+        summary['total_trades'],
+        help="Total number of completed trades"
+    )
     m2.metric(
         "Win Rate",
         f"{summary['win_rate']}%",
         delta_color="normal" if summary['win_rate'] >= 50 else "inverse"
     )
     m3.metric(
-        "Net Profit",
-        f"{summary['net_profit']:.5f}",
-        delta_color="normal" if summary['net_profit'] >= 0 else "inverse"
+        "Net Profit ($)",
+        f"${summary['net_profit_money']:.2f}",
+        delta_color="normal" if summary['net_profit_money'] >= 0 else "inverse",
+        help=f"Net P&L in currency (lot size: {lot_size})"
     )
-    m4.metric("Max Drawdown", f"{summary['max_drawdown']:.5f}", delta_color="inverse")
+    m4.metric(
+        "Max Drawdown",
+        f"{summary['max_drawdown']:.5f}",
+        delta_color="inverse"
+    )
 
-    m5, m6, m7, m8 = st.columns(4)
-    m5.metric("Buy Trades", summary['buy_trades'])
-    m6.metric("Sell Trades", summary['sell_trades'])
-    m7.metric("Winning", summary['winning_trades'], delta_color="normal")
-    m8.metric("Losing", summary['losing_trades'], delta_color="inverse")
+    # =============================================================================
+    # METRICS - ROW 2 (P&L Details)
+    # =============================================================================
+
+    st.subheader("💰 P&L Details")
+
+    p1, p2, p3, p4 = st.columns(4)
+
+    p1.metric(
+        "Gross Profit",
+        f"${calculate_pnl_money(summary['gross_profit'], symbol, lot_size):.2f}",
+        delta_color="normal"
+    )
+    p2.metric(
+        "Gross Loss",
+        f"${calculate_pnl_money(summary['gross_loss'], symbol, lot_size):.2f}",
+        delta_color="inverse"
+    )
+    p3.metric(
+        "Profit Factor",
+        f"{summary['profit_factor']}",
+        help="Gross profit / Gross loss (>1 is good)"
+    )
+    p4.metric(
+        "Expectancy",
+        f"{summary['expectancy']:.5f}",
+        help="Average profit per trade in points"
+    )
+
+    # =============================================================================
+    # METRICS - ROW 3 (Trade Stats)
+    # =============================================================================
+
+    st.subheader("📈 Trade Statistics")
+
+    t1, t2, t3, t4 = st.columns(4)
+
+    t1.metric("Buy Trades", summary['buy_trades'])
+    t2.metric("Sell Trades", summary['sell_trades'])
+    t3.metric("Winning Trades", summary['winning_trades'], delta_color="normal")
+    t4.metric("Losing Trades", summary['losing_trades'], delta_color="inverse")
+
+    # =============================================================================
+    # METRICS - ROW 4 (Averages & Extremes)
+    # =============================================================================
+
+    a1, a2, a3, a4 = st.columns(4)
+
+    a1.metric(
+        "Avg Win",
+        f"{summary['avg_win']:.5f}",
+        help="Average winning trade in points"
+    )
+    a2.metric(
+        "Avg Loss",
+        f"{summary['avg_loss']:.5f}",
+        help="Average losing trade in points"
+    )
+    a3.metric(
+        "Largest Win",
+        f"{summary['largest_win']:.5f}",
+        delta_color="normal"
+    )
+    a4.metric(
+        "Largest Loss",
+        f"{summary['largest_loss']:.5f}",
+        delta_color="inverse"
+    )
+
+    # =============================================================================
+    # METRICS - ROW 5 (Risk)
+    # =============================================================================
+
+    r1, r2 = st.columns(2)
+
+    r1.metric(
+        "Max Consecutive Losses",
+        summary['max_consecutive_losses'],
+        help="Maximum number of consecutive losing trades"
+    )
+    r2.metric(
+        "Avg Profit/Trade",
+        f"{summary['avg_profit']:.5f}",
+        help="Net profit divided by total trades"
+    )
 
     st.divider()
 
@@ -501,33 +700,32 @@ if run:
     st.subheader("📈 Equity Curve")
 
     if trades and len(trades) > 0:
-        # Build equity data
         equity_data = []
         cumulative = 0
         for trade in trades:
-            cumulative += trade['pnl']
+            cumulative += trade['pnl_points']
             equity_data.append({
-                'time': trade['exit_time'],
-                'equity': cumulative
+                'time': trade['exit_time'].strftime('%Y-%m-%d %H:%M') if hasattr(trade['exit_time'], 'strftime') else str(trade['exit_time']),
+                'equity_points': round(cumulative, 5),
+                'equity_money': round(calculate_pnl_money(cumulative, symbol, lot_size), 2)
             })
 
         equity_df = pd.DataFrame(equity_data)
 
-        # Plot
         fig = go.Figure()
 
-        # Equity line
+        # Equity in money
         fig.add_trace(go.Scatter(
             x=equity_df['time'],
-            y=equity_df['equity'],
-            mode='lines',
-            name='Equity',
+            y=equity_df['equity_money'],
+            mode='lines+markers',
+            name='Equity ($)',
             line=dict(color='#58a6ff', width=2),
             fill='tozeroy',
-            fillcolor='rgba(88, 166, 255, 0.15)'
+            fillcolor='rgba(88, 166, 255, 0.15)',
+            hovertemplate='%{x}<br>$%{y:.2f}<extra></extra>'
         ))
 
-        # Zero line
         fig.add_hline(y=0, line_dash="dot", line_color="#8b949e", opacity=0.5)
 
         fig.update_layout(
@@ -538,7 +736,7 @@ if run:
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             xaxis=dict(gridcolor='#30363d'),
-            yaxis=dict(gridcolor='#30363d')
+            yaxis=dict(gridcolor='#30363d', title='P&L ($)')
         )
 
         st.plotly_chart(fig, use_container_width=True)
@@ -554,58 +752,52 @@ if run:
     st.subheader("📋 Trade History")
 
     if trades and len(trades) > 0:
-        # Create DataFrame
-        trades_df = pd.DataFrame(trades)
+        # Prepare display data
+        display_trades = []
+        for t in trades:
+            pnl_money = calculate_pnl_money(t['pnl_points'], symbol, lot_size)
+            entry_str = t['entry_time'].strftime('%Y-%m-%d %H:%M') if hasattr(t['entry_time'], 'strftime') else str(t['entry_time'])
+            exit_str = t['exit_time'].strftime('%Y-%m-%d %H:%M') if hasattr(t['exit_time'], 'strftime') else str(t['exit_time'])
 
-        # Rename columns for display
-        trades_df_display = trades_df.rename(columns={
-            'num': '#',
-            'direction': 'Direction',
-            'entry_time': 'Entry Time',
-            'entry_price': 'Entry Price',
-            'exit_time': 'Exit Time',
-            'exit_price': 'Exit Price',
-            'pnl': 'P&L',
-            'pnl_pct': 'P&L %',
-            'exit_reason': 'Exit Reason'
-        })
+            display_trades.append({
+                '#': t['num'],
+                'Direction': t['direction'],
+                'Entry Time': entry_str,
+                'Entry Price': round(t['entry_price'], 5),
+                'Exit Time': exit_str,
+                'Exit Price': round(t['exit_price'], 5),
+                'P&L (pts)': round(t['pnl_points'], 5),
+                'P&L ($)': round(pnl_money, 2),
+                'P&L %': round((t['pnl_points'] / t['entry_price']) * 100, 2),
+                'Exit Reason': t['exit_reason']
+            })
 
-        # Display with HTML coloring via markdown
-        st.markdown("""
-        <style>
-            .trade-table { width: 100%; border-collapse: collapse; }
-            .trade-table th { background: #161b22; padding: 10px; text-align: left; border-bottom: 1px solid #30363d; color: #8b949e; font-size: 0.85rem; }
-            .trade-table td { padding: 10px; border-bottom: 1px solid #30363d; color: #c9d1d9; font-size: 0.9rem; }
-            .trade-table tr:hover { background: #161b22; }
-            .positive { color: #3fb950; }
-            .negative { color: #f85149; }
-            .buy-tag { color: #3fb950; font-weight: 600; }
-            .sell-tag { color: #f85149; font-weight: 600; }
-        </style>
-        """, unsafe_allow_html=True)
+        trades_df = pd.DataFrame(display_trades)
 
-        # Build HTML table manually (safe, no style.applymap)
-        html = '<table class="trade-table">'
-        html += '<thead><tr>'
-        html += '<th>#</th><th>Direction</th><th>Entry Time</th><th>Entry Price</th>'
-        html += '<th>Exit Time</th><th>Exit Price</th><th>P&L</th><th>P&L %</th><th>Exit Reason</th>'
+        # HTML table with colors
+        html = '<table style="width:100%; border-collapse:collapse; font-size:0.85rem;">'
+        html += '<thead><tr style="background:#161b22; color:#8b949e;">'
+        headers = ['#', 'Dir', 'Entry Time', 'Entry', 'Exit Time', 'Exit', 'P&L (pts)', 'P&L ($)', 'P&L %', 'Exit']
+        for h in headers:
+            html += f'<th style="padding:10px; text-align:left; border-bottom:1px solid #30363d;">{h}</th>'
         html += '</tr></thead><tbody>'
 
         for _, row in trades_df.iterrows():
-            pnl_class = 'positive' if row['pnl'] >= 0 else 'negative'
-            dir_class = 'buy-tag' if row['direction'] == 'BUY' else 'sell-tag'
-            pnl_sign = '+' if row['pnl'] >= 0 else ''
+            pnl_class = 'color:#3fb950;' if row['P&L (pts)'] >= 0 else 'color:#f85149;'
+            dir_class = 'color:#3fb950; font-weight:600;' if row['Direction'] == 'BUY' else 'color:#f85149; font-weight:600;'
+            pnl_sign = '+' if row['P&L (pts)'] >= 0 else ''
 
-            html += '<tr>'
-            html += f"<td>{row['num']}</td>"
-            html += f"<td class='{dir_class}'>{row['direction']}</td>"
-            html += f"<td>{row['entry_time']}</td>"
-            html += f"<td>{row['entry_price']:.5f}</td>"
-            html += f"<td>{row['exit_time']}</td>"
-            html += f"<td>{row['exit_price']:.5f}</td>"
-            html += f"<td class='{pnl_class}'>{pnl_sign}{row['pnl']:.5f}</td>"
-            html += f"<td class='{pnl_class}'>{pnl_sign}{row['pnl_pct']:.2f}%</td>"
-            html += f"<td>{row['exit_reason']}</td>"
+            html += '<tr style="color:#c9d1d9;">'
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d;'>{row['#']}</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d; {dir_class}'>{row['Direction']}</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d;'>{row['Entry Time']}</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d;'>{row['Entry Price']}</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d;'>{row['Exit Time']}</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d;'>{row['Exit Price']}</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d; {pnl_class}'>{pnl_sign}{row['P&L (pts)']}</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d; {pnl_class}'>{pnl_sign}${row['P&L ($)']:.2f}</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d; {pnl_class}'>{pnl_sign}{row['P&L %']:.2f}%</td>"
+            html += f"<td style='padding:8px; border-bottom:1px solid #30363d;'>{row['Exit Reason']}</td>"
             html += '</tr>'
 
         html += '</tbody></table>'
@@ -615,13 +807,13 @@ if run:
         # CSV Download
         csv_data = trades_df.to_csv(index=False)
         st.download_button(
-            label="📥 Download CSV",
+            label="📥 Download Trade History (CSV)",
             data=csv_data,
-            file_name=f"backtest_{symbol_key.replace('/', '_')}_{timeframe}.csv",
+            file_name=f"backtest_{display_name.replace('/', '_')}_{timeframe}.csv",
             mime="text/csv"
         )
     else:
-        st.warning("⚠️ No trades found for this setup. Try a different period or timeframe.")
+        st.warning("⚠️ No trades found. Try a different period or timeframe.")
 
 else:
     # Welcome screen
@@ -641,17 +833,25 @@ else:
         **Exit Rules:**
         - ATR trailing stop (moves only in profit direction)
         - Stop loss hit OR opposite crossover
+
+        **P&L Calculation:**
+        - P&L in points based on price movement
+        - P&L in $ based on lot size (0.1 lot = 10,000 units)
         """)
 
     with col2:
-        st.subheader("📌 Symbols")
+        st.subheader("📌 Available Symbols")
         st.markdown("""
-        | Asset | Symbol |
-        |-------|--------|
-        | EUR/USD | EURUSD=X |
-        | GBP/USD | GBPUSD=X |
-        | BTC/USD | BTC-USD |
-        | Apple | AAPL |
+        **Forex (24 pairs):**
+        EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CHF...
+
+        **Crypto (12 coins):**
+        BTC/USD, ETH/USD, SOL/USD, BNB/USD...
+
+        **Stocks (12 assets):**
+        AAPL, TSLA, MSFT, GOOGL, NVDA...
+
+        **Or select "Other" to enter any Yahoo Finance symbol**
         """)
 
     st.divider()
