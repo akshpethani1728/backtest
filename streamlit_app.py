@@ -268,18 +268,46 @@ def calculate_pnl_money(pnl_points: float, symbol: str, lot_size: float) -> floa
     else:
         return pnl_points * 100 * lot_size
 
+def calculate_investment(symbol: str, entry_price: float, lot_size: float) -> float:
+    """Calculate required investment/margin for a trade."""
+    if '-' in symbol and symbol.endswith('-USD'):
+        # Crypto: 1 lot = 1 coin
+        return entry_price * lot_size
+    elif '=' in symbol:
+        # Forex: 1 lot = 100,000 units, 0.1 lot = 10,000 units
+        return entry_price * 10000 * lot_size
+    else:
+        # Stocks: approximate
+        return entry_price * 100 * lot_size
+
+def calculate_roi(pnl_money: float, investment: float) -> float:
+    """Calculate ROI percentage."""
+    if investment > 0:
+        return (pnl_money / investment) * 100
+    return 0
+
 # =============================================================================
 # BACKTEST ENGINE
 # =============================================================================
 
 def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
+    """
+    Enhanced backtest with ATR trend-based exits.
+
+    Exit conditions:
+    1. ATR trailing stop hit
+    2. Opposite EMA crossover
+    3. ATR trend reversal (ATR expanding against trade direction = early exit)
+    """
     trades = []
     position = None
     entry_price = 0
     entry_time = None
     atr_stop = 0
+    entry_atr = 0
     prev_ema20 = None
     prev_ema50 = None
+    prev_atr = None
 
     for i, (idx, row) in enumerate(df.iterrows()):
         curr_ema20 = row['EMA_20']
@@ -292,32 +320,51 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
         if pd.isna(curr_ema20) or pd.isna(curr_ema50) or pd.isna(curr_atr):
             prev_ema20 = curr_ema20
             prev_ema50 = curr_ema50
+            prev_atr = curr_atr
             continue
         if prev_ema20 is None:
             prev_ema20 = curr_ema20
             prev_ema50 = curr_ema50
+            prev_atr = curr_atr
             continue
 
-        # Close position
+        # === ATR TREND DETECTION ===
+        # ATR expanding = volatility increasing, ATR contracting = calming
+        atr_expanding = prev_atr is not None and curr_atr > prev_atr
+        atr_contracting = prev_atr is not None and curr_atr < prev_atr
+
+        # === CLOSE POSITION ===
         if position == 'buy':
             new_stop = curr_close - (atr_multiplier * curr_atr)
             if new_stop > atr_stop:
                 atr_stop = new_stop
 
+            # 1. ATR trailing stop hit
             if curr_low <= atr_stop:
                 trades.append({
                     'num': len(trades) + 1, 'direction': 'BUY',
                     'entry_time': entry_time, 'entry_price': entry_price,
-                    'exit_time': idx, 'exit_price': atr_stop,
-                    'pnl_points': atr_stop - entry_price, 'exit_reason': 'Stop Loss'
+                    'entry_atr': entry_atr, 'exit_time': idx, 'exit_price': atr_stop,
+                    'pnl_points': atr_stop - entry_price, 'exit_reason': 'ATR Stop'
                 })
                 position = None
+            # 2. Opposite EMA crossover
             elif prev_ema20 >= prev_ema50 and curr_ema20 < curr_ema50:
                 trades.append({
                     'num': len(trades) + 1, 'direction': 'BUY',
                     'entry_time': entry_time, 'entry_price': entry_price,
-                    'exit_time': idx, 'exit_price': curr_close,
-                    'pnl_points': curr_close - entry_price, 'exit_reason': 'Opposite Signal'
+                    'entry_atr': entry_atr, 'exit_time': idx, 'exit_price': curr_close,
+                    'pnl_points': curr_close - entry_price, 'exit_reason': 'EMA Cross'
+                })
+                position = None
+            # 3. ATR EXPANDING AGAINST BUY (volatility spike against position)
+            elif atr_expanding and curr_atr > entry_atr * 1.2 and curr_close < entry_price:
+                # ATR expanded 20%+ AND price is below entry = adverse move
+                trades.append({
+                    'num': len(trades) + 1, 'direction': 'BUY',
+                    'entry_time': entry_time, 'entry_price': entry_price,
+                    'entry_atr': entry_atr, 'exit_time': idx, 'exit_price': curr_close,
+                    'pnl_points': curr_close - entry_price, 'exit_reason': 'ATR Reversal'
                 })
                 position = None
 
@@ -326,38 +373,53 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
             if new_stop < atr_stop:
                 atr_stop = new_stop
 
+            # 1. ATR trailing stop hit
             if curr_high >= atr_stop:
                 trades.append({
                     'num': len(trades) + 1, 'direction': 'SELL',
                     'entry_time': entry_time, 'entry_price': entry_price,
-                    'exit_time': idx, 'exit_price': atr_stop,
-                    'pnl_points': entry_price - atr_stop, 'exit_reason': 'Stop Loss'
+                    'entry_atr': entry_atr, 'exit_time': idx, 'exit_price': atr_stop,
+                    'pnl_points': entry_price - atr_stop, 'exit_reason': 'ATR Stop'
                 })
                 position = None
+            # 2. Opposite EMA crossover
             elif prev_ema20 <= prev_ema50 and curr_ema20 > curr_ema50:
                 trades.append({
                     'num': len(trades) + 1, 'direction': 'SELL',
                     'entry_time': entry_time, 'entry_price': entry_price,
-                    'exit_time': idx, 'exit_price': curr_close,
-                    'pnl_points': entry_price - curr_close, 'exit_reason': 'Opposite Signal'
+                    'entry_atr': entry_atr, 'exit_time': idx, 'exit_price': curr_close,
+                    'pnl_points': entry_price - curr_close, 'exit_reason': 'EMA Cross'
+                })
+                position = None
+            # 3. ATR EXPANDING AGAINST SELL (volatility spike against position)
+            elif atr_expanding and curr_atr > entry_atr * 1.2 and curr_close > entry_price:
+                # ATR expanded 20%+ AND price is above entry = adverse move
+                trades.append({
+                    'num': len(trades) + 1, 'direction': 'SELL',
+                    'entry_time': entry_time, 'entry_price': entry_price,
+                    'entry_atr': entry_atr, 'exit_time': idx, 'exit_price': curr_close,
+                    'pnl_points': entry_price - curr_close, 'exit_reason': 'ATR Reversal'
                 })
                 position = None
 
-        # New entry
+        # === NEW ENTRY ===
         if position is None:
             if prev_ema20 <= prev_ema50 and curr_ema20 > curr_ema50:
                 position = 'buy'
                 entry_price = curr_close
                 entry_time = idx
+                entry_atr = curr_atr  # Store entry ATR
                 atr_stop = curr_close - (atr_multiplier * curr_atr)
             elif prev_ema20 >= prev_ema50 and curr_ema20 < curr_ema50:
                 position = 'sell'
                 entry_price = curr_close
                 entry_time = idx
+                entry_atr = curr_atr  # Store entry ATR
                 atr_stop = curr_close + (atr_multiplier * curr_atr)
 
         prev_ema20 = curr_ema20
         prev_ema50 = curr_ema50
+        prev_atr = curr_atr
 
     # Close at end
     if position is not None and len(df) > 0:
@@ -368,7 +430,7 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> list:
         trades.append({
             'num': len(trades) + 1, 'direction': direction,
             'entry_time': entry_time, 'entry_price': entry_price,
-            'exit_time': last_time, 'exit_price': last_close,
+            'entry_atr': entry_atr, 'exit_time': last_time, 'exit_price': last_close,
             'pnl_points': pnl, 'exit_reason': 'End of Data'
         })
 
@@ -386,7 +448,8 @@ def calculate_summary(trades: list, symbol: str, lot_size: float) -> dict:
             'avg_profit': 0, 'avg_win': 0, 'avg_loss': 0, 'max_drawdown': 0,
             'max_consecutive_losses': 0, 'buy_trades': 0, 'sell_trades': 0,
             'winning_trades': 0, 'losing_trades': 0, 'largest_win': 0,
-            'largest_loss': 0, 'profit_factor': 0, 'expectancy': 0
+            'largest_loss': 0, 'profit_factor': 0, 'expectancy': 0,
+            'total_investment': 0, 'total_roi': 0, 'avg_investment': 0, 'avg_roi': 0
         }
 
     total = len(trades)
@@ -397,6 +460,17 @@ def calculate_summary(trades: list, symbol: str, lot_size: float) -> dict:
     gross_profit = sum(t['pnl_points'] for t in winning)
     gross_loss = abs(sum(t['pnl_points'] for t in losing))
     net_profit_money = calculate_pnl_money(net_profit_points, symbol, lot_size)
+
+    # Calculate investment for each trade
+    investments = []
+    for t in trades:
+        inv = calculate_investment(symbol, t['entry_price'], lot_size)
+        investments.append(inv)
+
+    total_investment = sum(investments)
+    total_roi = calculate_roi(net_profit_money, total_investment) if total_investment > 0 else 0
+    avg_investment = total_investment / total if total > 0 else 0
+    avg_roi = (net_profit_money / avg_investment * 100) if avg_investment > 0 else 0
 
     cumulative = 0
     peak = 0
@@ -444,7 +518,11 @@ def calculate_summary(trades: list, symbol: str, lot_size: float) -> dict:
         'largest_win': round(largest_win, 5),
         'largest_loss': round(largest_loss, 5),
         'profit_factor': round(profit_factor, 2) if profit_factor != float('inf') else '∞',
-        'expectancy': round(expectancy, 5)
+        'expectancy': round(expectancy, 5),
+        'total_investment': round(total_investment, 2),
+        'total_roi': round(total_roi, 2),
+        'avg_investment': round(avg_investment, 2),
+        'avg_roi': round(avg_roi, 2)
     }
 
 # =============================================================================
@@ -596,7 +674,23 @@ if run:
 
         st.divider()
 
-        # Row 2 - P&L Details
+        # Row 2 - Investment & ROI
+        st.markdown("### 💵 Investment & Returns")
+        inv1, inv2, inv3, inv4 = st.columns(4)
+
+        roi_color = "normal" if summary['total_roi'] >= 0 else "inverse"
+        inv1.metric("Total Investment", f"${summary['total_investment']:.2f}",
+                   help="Total capital required for all trades")
+        inv2.metric("Net Profit", f"${summary['net_profit_money']:.2f}", delta_color=roi_color,
+                   help="Net profit/loss in currency")
+        inv3.metric("Total ROI", f"{summary['total_roi']:.2f}%", delta_color=roi_color,
+                   help="Return on Investment percentage")
+        inv4.metric("Avg ROI/Trade", f"{summary['avg_roi']:.2f}%", delta_color=roi_color,
+                   help="Average ROI per trade")
+
+        st.divider()
+
+        # Row 3 - P&L Details
         st.markdown("### 💰 Profit & Loss")
         p1, p2, p3, p4 = st.columns(4)
 
@@ -612,7 +706,7 @@ if run:
 
         st.divider()
 
-        # Row 3 - Trade breakdown
+        # Row 4 - Trade breakdown
         st.markdown("### 📈 Trade Breakdown")
         t1, t2, t3, t4, t5 = st.columns(5)
 
@@ -624,7 +718,7 @@ if run:
 
         st.divider()
 
-        # Row 4 - Averages
+        # Row 5 - Averages
         st.markdown("### 📉 Averages & Extremes")
         a1, a2, a3, a4 = st.columns(4)
 
@@ -677,16 +771,19 @@ if run:
             display_trades = []
             for t in trades:
                 pnl_money = calculate_pnl_money(t['pnl_points'], symbol, lot_size)
+                investment = calculate_investment(symbol, t['entry_price'], lot_size)
+                roi = calculate_roi(pnl_money, investment)
                 display_trades.append({
                     '#': t['num'],
                     'Direction': t['direction'],
                     'Entry': t['entry_time'].strftime('%m/%d %H:%M') if hasattr(t['entry_time'], 'strftime') else str(t['entry_time']),
                     'Entry Price': round(t['entry_price'], 5),
+                    'Investment': f"${investment:.2f}",
                     'Exit': t['exit_time'].strftime('%m/%d %H:%M') if hasattr(t['exit_time'], 'strftime') else str(t['exit_time']),
                     'Exit Price': round(t['exit_price'], 5),
                     'P&L (pts)': round(t['pnl_points'], 5),
                     'P&L ($)': round(pnl_money, 2),
-                    'P&L %': round((t['pnl_points'] / t['entry_price']) * 100, 2),
+                    'ROI %': f"{roi:.2f}%",
                     'Exit Reason': t['exit_reason']
                 })
 
@@ -695,12 +792,12 @@ if run:
             # HTML Table
             html = '<table class="trade-table">'
             html += '<thead><tr>'
-            for h in ['#', 'Dir', 'Entry', 'Entry Price', 'Exit', 'Exit Price', 'P&L (pts)', 'P&L ($)', 'P&L %', 'Exit']:
+            for h in ['#', 'Dir', 'Entry', 'Entry Price', 'Inv ($)', 'Exit', 'Exit Price', 'P&L (pts)', 'P&L ($)', 'ROI %', 'Exit']:
                 html += f'<th>{h}</th>'
             html += '</tr></thead><tbody>'
 
             for _, row in trades_df.iterrows():
-                pnl_c = '#3fb950' if row['P&L (pts)'] >= 0 else '#f85149'
+                pnl_c = '#3fb950' if '+$' in str(row['P&L ($)']) or (str(row['P&L ($)']).replace('$','').replace('.','').replace('-','').isdigit() and float(str(row['P&L ($)']).replace('$','')) >= 0) else '#f85149'
                 dir_c = '#3fb950' if row['Direction'] == 'BUY' else '#f85149'
                 sign = '+' if row['P&L (pts)'] >= 0 else ''
 
@@ -709,11 +806,12 @@ if run:
                 html += f"<td style='color:{dir_c};font-weight:600;'>{row['Direction']}</td>"
                 html += f"<td>{row['Entry']}</td>"
                 html += f"<td>{row['Entry Price']}</td>"
+                html += f"<td>{row['Investment']}</td>"
                 html += f"<td>{row['Exit']}</td>"
                 html += f"<td>{row['Exit Price']}</td>"
                 html += f"<td style='color:{pnl_c};'>{sign}{row['P&L (pts)']}</td>"
-                html += f"<td style='color:{pnl_c};'>{sign}${row['P&L ($)']:.2f}</td>"
-                html += f"<td style='color:{pnl_c};'>{sign}{row['P&L %']:.2f}%</td>"
+                html += f"<td style='color:{pnl_c};'>{sign}${str(row['P&L ($)']).replace('$','')}</td>"
+                html += f"<td style='color:{pnl_c};'>{row['ROI %']}</td>"
                 html += f"<td>{row['Exit Reason']}</td>"
                 html += '</tr>'
 
