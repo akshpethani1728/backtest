@@ -13,39 +13,38 @@
 //+------------------------------------------------------------------+
 input group "=== TRADING ON/OFF ===";
 input bool EnableTrading = true;           // Enable/Disable Trading System
-input int MagicNumber = 2024;             // Magic Number (ID for this EA)
+input int MagicNumber = 2024;              // Magic Number (ID for this EA)
 
 input group "=== INDICATOR SETTINGS ===";
 input int      FastEMA_Period   = 20;      // Fast EMA Period
 input int      SlowEMA_Period   = 50;      // Slow EMA Period
 input int      ATR_Period       = 14;      // ATR Period
-input double   ATR_Multiplier  = 1.5;     // ATR Multiplier (Stop Distance)
+input double   ATR_Multiplier   = 1.5;     // ATR Multiplier (Stop Distance)
 
 input group "=== LOT & RISK ===";
 input double   FixedLotSize     = 0.1;      // Fixed Lot Size (0.1 = 10,000 units)
-input double   MaxRiskPercent  = 2.0;       // Max Risk Per Trade (% of balance)
-input bool     UseFixedLot     = true;      // Use Fixed Lot Size (true) or Risk Percentage (false)
+input double   MaxRiskPercent   = 2.0;      // Max Risk Per Trade (% of balance)
+input bool     UseFixedLot      = true;      // Use Fixed Lot Size (true) or Risk Percentage (false)
 
 input group "=== ATR REVERSAL SETTINGS ===";
 input bool     EnableATRReversal = true;    // Enable ATR Reversal Exit
-input double   ATRReversalThreshold = 1.2;  // ATR Expansion Threshold (1.2 = 20%)
+input double   ATRReversalThreshold = 1.2;   // ATR Expansion Threshold (1.2 = 20%)
 
 input group "=== TRADE MANAGEMENT ===";
 input bool     UseTrailingStop   = true;    // Use ATR Trailing Stop
 input bool     CloseOnOpposite   = true;    // Close on Opposite Signal
-input uint     MaxTradesPerDay  = 5;       // Max Trades Per Day
+input uint     MaxTradesPerDay   = 5;       // Max Trades Per Day
 input int      MaxSlippage       = 3;       // Max Slippage (points)
 
 input group "=== SESSION TIMES (Broker Server Time) ===";
-input bool     UseTradingHours   = false;    // Use Trading Hours Filter
-input int      TradeStartHour   = 9;        // Start Hour (24h format)
-input int      TradeEndHour     = 17;       // End Hour (24h format)
+input bool     UseTradingHours   = false;   // Use Trading Hours Filter
+input int      TradeStartHour    = 9;       // Start Hour (24h format)
+input int      TradeEndHour      = 17;      // End Hour (24h format)
 
 input group "=== ADVANCED ===";
-input int      DeviationPoints  = 10;       // Deviation for order execution
-input ulong    OrderStopsDelta  = 50;       // Stop level delta (points)
-input bool     PrintIndicators  = false;    // Print Indicator Values to Log
-input bool     VerboseLogging  = true;      // Verbose Logging
+input int      DeviationPoints   = 10;      // Deviation for order execution
+input bool     PrintIndicators   = false;   // Print Indicator Values to Log
+input bool     VerboseLogging   = true;     // Verbose Logging
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -53,16 +52,15 @@ input bool     VerboseLogging  = true;      // Verbose Logging
 datetime lastTradeTime = 0;
 datetime lastDailyReset = 0;
 int tradesToday = 0;
-double lastKnownEquity = 0;
 bool eaEnabled = false;
 
 //+------------------------------------------------------------------+
 //| ENUMS & STRUCTURES                                               |
 //+------------------------------------------------------------------+
 enum TradeDirection {
-    TRADE_NONE    = 0,
-    TRADE_BUY     = 1,
-    TRADE_SELL    = 2
+    TRADE_NONE = 0,
+    TRADE_BUY  = 1,
+    TRADE_SELL = 2
 };
 
 struct TradeState {
@@ -84,17 +82,13 @@ TradeDirection lastDirection = TRADE_NONE;
 //| ATR CALCULATION                                                   |
 //+------------------------------------------------------------------+
 double CalculateATR(int period, int shift = 0) {
-    double tr = 0;
-    double high = iHigh(_Symbol, PERIOD_CURRENT, shift);
-    double low = iLow(_Symbol, PERIOD_CURRENT, shift);
-    double prevClose = iClose(_Symbol, PERIOD_CURRENT, shift + 1);
+    double tr1 = iHigh(_Symbol, PERIOD_CURRENT, shift) - iLow(_Symbol, PERIOD_CURRENT, shift);
+    double tr2 = MathAbs(iHigh(_Symbol, PERIOD_CURRENT, shift) - iClose(_Symbol, PERIOD_CURRENT, shift + 1));
+    double tr3 = MathAbs(iLow(_Symbol, PERIOD_CURRENT, shift) - iClose(_Symbol, PERIOD_CURRENT, shift + 1));
 
-    double tr1 = high - low;
-    double tr2 = MathAbs(high - prevClose);
-    double tr3 = MathAbs(low - prevClose);
+    double tr = MathMax(tr1, MathMax(tr2, tr3));
 
-    tr = MathMax(tr1, MathMax(tr2, tr3));
-
+    // Use iATR for proper ATR value
     double atr = iATR(_Symbol, PERIOD_CURRENT, period, shift);
     return atr;
 }
@@ -118,12 +112,14 @@ TradeDirection CheckTradeConditions() {
     double currClose = iClose(_Symbol, PERIOD_CURRENT, 1);
     double currATR = CalculateATR(ATR_Period, 1);
 
+    // BUY: Fast EMA crosses above Slow EMA
     if(emaFastPrev <= emaSlowPrev && emaFastCurr > emaSlowCurr) {
         if(currClose > emaFastCurr && currClose > emaSlowCurr) {
             return TRADE_BUY;
         }
     }
 
+    // SELL: Fast EMA crosses below Slow EMA
     if(emaFastPrev >= emaSlowPrev && emaFastCurr < emaSlowCurr) {
         if(currClose < emaFastCurr && currClose < emaSlowCurr) {
             return TRADE_SELL;
@@ -179,9 +175,13 @@ double CalculateLotSize() {
 
     double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
     double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    double pointValue = tickValue / tickSize;
 
-    double lots = riskAmount / (stopDistance * pointValue * 10);
+    if(tickSize == 0) {
+        return FixedLotSize;
+    }
+
+    double pointValue = tickValue / tickSize;
+    double lots = riskAmount / (stopDistance * pointValue);
 
     double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
@@ -240,36 +240,33 @@ bool OpenTrade(TradeDirection tradeDir) {
     if(tradeDir == TRADE_NONE) return false;
     if(!CanOpenTrade()) return false;
     if(!IsWithinTradingHours()) return false;
+    if(!EnableTrading) return false;
 
     double lotSize = CalculateLotSize();
     double atr = CalculateATR(ATR_Period, 1);
-    double stopDistance = atr * ATR_Multiplier * _Point * 10;
+    double stopDistance = atr * ATR_Multiplier;
 
     double askPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double bidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
     double entryPrice = 0;
     double stopLoss = 0;
-    double takeProfit = 0;
 
-    ENUM_TRADE_REQUEST_ACTION action;
+    ENUM_ORDER_TYPE orderType;
     ENUM_ORDER_TYPE_FILLING fillingType = ORDER_FILLING_FOK;
 
     if(tradeDir == TRADE_BUY) {
-        action = TRADE_ACTION_DEAL;
         entryPrice = askPrice;
-
+        orderType = ORDER_TYPE_BUY;
         stopLoss = entryPrice - stopDistance;
 
         double minStop = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
         if(stopLoss < bidPrice - minStop) {
             stopLoss = bidPrice - minStop;
         }
-
     } else if(tradeDir == TRADE_SELL) {
-        action = TRADE_ACTION_DEAL;
         entryPrice = bidPrice;
-
+        orderType = ORDER_TYPE_SELL;
         stopLoss = entryPrice + stopDistance;
 
         double minStop = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
@@ -281,11 +278,11 @@ bool OpenTrade(TradeDirection tradeDir) {
     MqlTradeRequest request = {};
     MqlTradeResult result = {};
 
-    request.action = action;
+    request.action = TRADE_ACTION_DEAL;
     request.magic = MagicNumber;
     request.symbol = _Symbol;
     request.volume = lotSize;
-    request.type = (tradeDir == TRADE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    request.type = orderType;
     request.price = entryPrice;
     request.sl = stopLoss;
     request.tp = 0;
@@ -331,13 +328,13 @@ bool OpenTrade(TradeDirection tradeDir) {
 bool CloseTrade(string reason) {
     if(!currentTrade.isActive) return false;
 
-    ENUM_POSITION_TYPE posType = (currentTrade.direction == TRADE_BUY) ?
-                                  POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-
-    if(!PositionSelect(_Symbol)) return false;
+    if(!PositionSelect(_Symbol)) {
+        currentTrade.isActive = false;
+        currentTrade.direction = TRADE_NONE;
+        return false;
+    }
 
     double lotSize = PositionGetDouble(POSITION_VOLUME);
-    double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
     ENUM_ORDER_TYPE orderType = (currentTrade.direction == TRADE_BUY) ?
                                ORDER_TYPE_SELL : ORDER_TYPE_BUY;
 
@@ -388,11 +385,9 @@ void UpdateTrailingStop() {
     double currClose = iClose(_Symbol, PERIOD_CURRENT, 1);
 
     if(currentTrade.direction == TRADE_BUY) {
-        double newStop = currClose - (currATR * ATR_Multiplier * _Point * 10);
+        double newStop = currClose - (currATR * ATR_Multiplier);
 
         if(newStop > currentTrade.currentStop) {
-            currentTrade.currentStop = newStop;
-
             if(!PositionSelect(_Symbol)) return;
 
             MqlTradeRequest request = {};
@@ -404,18 +399,18 @@ void UpdateTrailingStop() {
             request.sl = newStop;
             request.position = PositionGetInteger(POSITION_TICKET);
 
-            OrderSend(request, result);
+            if(OrderSend(request, result) && result.retcode == TRADE_RETCODE_DONE) {
+                currentTrade.currentStop = newStop;
 
-            if(VerboseLogging) {
-                Print("Trailing Stop UPDATED: BUY - New Stop: ", newStop);
+                if(VerboseLogging) {
+                    Print("Trailing Stop UPDATED: BUY - New Stop: ", newStop);
+                }
             }
         }
     } else if(currentTrade.direction == TRADE_SELL) {
-        double newStop = currClose + (currATR * ATR_Multiplier * _Point * 10);
+        double newStop = currClose + (currATR * ATR_Multiplier);
 
         if(newStop < currentTrade.currentStop) {
-            currentTrade.currentStop = newStop;
-
             if(!PositionSelect(_Symbol)) return;
 
             MqlTradeRequest request = {};
@@ -427,10 +422,12 @@ void UpdateTrailingStop() {
             request.sl = newStop;
             request.position = PositionGetInteger(POSITION_TICKET);
 
-            OrderSend(request, result);
+            if(OrderSend(request, result) && result.retcode == TRADE_RETCODE_DONE) {
+                currentTrade.currentStop = newStop;
 
-            if(VerboseLogging) {
-                Print("Trailing Stop UPDATED: SELL - New Stop: ", newStop);
+                if(VerboseLogging) {
+                    Print("Trailing Stop UPDATED: SELL - New Stop: ", newStop);
+                }
             }
         }
     }
@@ -472,7 +469,6 @@ void OnTick() {
     if(currentTrade.isActive) {
         UpdateTrailingStop();
 
-        double atr = CalculateATR(ATR_Period, 1);
         double currClose = iClose(_Symbol, PERIOD_CURRENT, 1);
         double currLow = iLow(_Symbol, PERIOD_CURRENT, 1);
         double currHigh = iHigh(_Symbol, PERIOD_CURRENT, 1);
@@ -566,28 +562,16 @@ void OnDeinit(const int reason) {
 //+------------------------------------------------------------------+
 //| EXPERT ON CALCULATE                                                |
 //+------------------------------------------------------------------+
-double OnCalculate(const int rates_total,
-                  const int prev_calculated,
-                  const datetime &time[],
-                  const double &open[],
-                  const double &high[],
-                  const double &low[],
-                  const double &close[],
-                  const long &tick_volume[],
-                  const long &volume[],
-                  const double &spread[]) {
+int OnCalculate(const int rates_total,
+               const int prev_calculated,
+               const datetime &time[],
+               const double &open[],
+               const double &high[],
+               const double &low[],
+               const double &close[],
+               const long &tick_volume[],
+               const long &volume[],
+               const double &spread[]) {
     return rates_total;
-}
-
-//+------------------------------------------------------------------+
-//| EXPERT ON TESTER                                                  |
-//+------------------------------------------------------------------+
-double OnTester() {
-    double grossProfit = AccountInfoDouble(ACCOUNT_PROFIT);
-    double grossLoss = 0;
-
-    double netProfit = grossProfit - grossLoss;
-
-    return netProfit;
 }
 //+------------------------------------------------------------------+
