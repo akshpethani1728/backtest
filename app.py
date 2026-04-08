@@ -78,7 +78,7 @@ def calculate_indicators(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 5
     df['ATR'] = tr.rolling(window=atr_period).mean()
 
     # Fill NaN values at the beginning
-    df = df.fillna(method='bfill').fillna(method='ffill')
+    df = df.bfill().ffill()
 
     return df
 
@@ -118,15 +118,10 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> dict:
     pullback_crossover_idx = None
     pullback_price = 0
 
-    # Signal tracking
-    prev_ema_fast = None
-    prev_ema_slow = None
-
     for i, (idx, row) in enumerate(df.iterrows()):
-        if i < max(50, 14):  # Skip first rows for indicator stability
-            prev_ema_fast = row['EMA_Fast']
-            prev_ema_slow = row['EMA_Slow']
-            continue
+        prev_ema_fast = df.iloc[i - 1]['EMA_Fast'] if i > 0 else row['EMA_Fast']
+        prev_ema_slow = df.iloc[i - 1]['EMA_Slow'] if i > 0 else row['EMA_Slow']
+        prev_atr = df.iloc[i - 1]['ATR'] if i > 0 else row['ATR']
 
         curr_ema_fast = row['EMA_Fast']
         curr_ema_slow = row['EMA_Slow']
@@ -135,11 +130,10 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> dict:
         curr_low = row['Low']
         curr_atr = row['ATR']
 
-        # Detect crossover
-        prev_crossover_up = (prev_ema_fast > prev_ema_slow and curr_ema_fast > curr_ema_slow)
-        prev_crossover_down = (prev_ema_fast < prev_ema_slow and curr_ema_fast < curr_ema_slow)
+        if pd.isna(curr_ema_fast) or pd.isna(curr_ema_slow) or pd.isna(curr_atr):
+            continue
 
-        # Current crossover (for signal detection)
+        # Detect crossover
         curr_crossover_up = (prev_ema_fast <= prev_ema_slow and curr_ema_fast > curr_ema_slow)
         curr_crossover_down = (prev_ema_fast >= prev_ema_slow and curr_ema_fast < curr_ema_slow)
 
@@ -160,7 +154,7 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> dict:
                     'exit_price': round(exit_price, 5),
                     'direction': 'BUY',
                     'pnl': round(exit_price - entry_price, 5),
-                    'pnl_pct': round(((exit_price - entry_price) / entry_price) * 100, 2),
+                    'pnl_pct': round((exit_price / entry_price - 1) * 100, 2),
                     'exit_reason': 'Stop Loss'
                 })
                 position = None
@@ -199,7 +193,7 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> dict:
                     'exit_price': round(exit_price, 5),
                     'direction': 'SELL',
                     'pnl': round(entry_price - exit_price, 5),
-                    'pnl_pct': round(((entry_price - exit_price) / entry_price) * 100, 2),
+                    'pnl_pct': round((1 - exit_price / entry_price) * 100, 2),
                     'exit_reason': 'Stop Loss'
                 })
                 position = None
@@ -232,7 +226,7 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> dict:
                 pullback_price = curr_close
 
             # Check for pullback entry on BUY
-            elif in_pullback and position is None:
+            elif in_pullback:
                 # Price pulled back to EMA 20 (touched or came close)
                 pullback_tolerance = curr_atr * 0.5
                 near_ema = curr_low <= (curr_ema_fast + pullback_tolerance) and curr_low >= (curr_ema_fast - pullback_tolerance * 3)
@@ -249,14 +243,14 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> dict:
                     in_pullback = False
 
             # SELL SIGNAL
-            if position is None and curr_crossover_down and curr_close < curr_ema_fast and curr_close < curr_ema_slow:
+            elif curr_crossover_down and curr_close < curr_ema_fast and curr_close < curr_ema_slow:
                 # Mark crossover, wait for pullback
                 in_pullback = True
                 pullback_crossover_idx = i
                 pullback_price = curr_close
 
             # Check for pullback entry on SELL
-            elif in_pullback and position is None:
+            elif in_pullback:
                 pullback_tolerance = curr_atr * 0.5
                 near_ema = curr_high >= (curr_ema_fast - pullback_tolerance) and curr_high <= (curr_ema_fast + pullback_tolerance * 3)
 
@@ -270,9 +264,6 @@ def run_backtest(df: pd.DataFrame, atr_multiplier: float = 1.5) -> dict:
                 elif curr_close > curr_ema_slow:
                     # Price rose above slow EMA, cancel the sell setup
                     in_pullback = False
-
-        prev_ema_fast = curr_ema_fast
-        prev_ema_slow = curr_ema_slow
 
     # Close any open position at the end
     if position is not None and len(df) > 0:
