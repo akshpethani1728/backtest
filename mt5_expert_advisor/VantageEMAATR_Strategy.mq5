@@ -1,7 +1,6 @@
 //+------------------------------------------------------------------+
-//|                                         VantageEMAATR_Strategy.mq5 |
-//|                                         Vantage Trading Robot      |
-//|                                         EMA Crossover + ATR System |
+//|                              VantageEMAATR_Strategy.mq5           |
+//|                                         Vantage Trading Robot     |
 //+------------------------------------------------------------------+
 #property copyright "Vantage Trading System"
 #property link      "https://www.vantagefx.com"
@@ -9,271 +8,150 @@
 #property strict
 
 //+------------------------------------------------------------------+
-//| INPUTS - Trade Settings                                           |
+//| INPUT PARAMETERS                                                  |
 //+------------------------------------------------------------------+
-input group "=== TRADING ON/OFF ===";
-input bool EnableTrading = true;           // Enable/Disable Trading System
-input int MagicNumber = 2024;              // Magic Number (ID for this EA)
-
-input group "=== INDICATOR SETTINGS ===";
-input int      FastEMA_Period   = 20;      // Fast EMA Period
-input int      SlowEMA_Period   = 50;      // Slow EMA Period
-input int      ATR_Period       = 14;      // ATR Period
-input double   ATR_Multiplier   = 1.5;     // ATR Multiplier (Stop Distance)
-
-input group "=== LOT & RISK ===";
-input double   FixedLotSize     = 0.1;      // Fixed Lot Size (0.1 = 10,000 units)
-input double   MaxRiskPercent   = 2.0;      // Max Risk Per Trade (% of balance)
-input bool     UseFixedLot      = true;      // Use Fixed Lot Size (true) or Risk Percentage (false)
-
-input group "=== ATR REVERSAL SETTINGS ===";
-input bool     EnableATRReversal = true;    // Enable ATR Reversal Exit
-input double   ATRReversalThreshold = 1.2;   // ATR Expansion Threshold (1.2 = 20%)
-
-input group "=== TRADE MANAGEMENT ===";
-input bool     UseTrailingStop   = true;    // Use ATR Trailing Stop
-input bool     CloseOnOpposite   = true;    // Close on Opposite Signal
-input uint     MaxTradesPerDay   = 5;       // Max Trades Per Day
-input int      MaxSlippage       = 3;       // Max Slippage (points)
-
-input group "=== SESSION TIMES (Broker Server Time) ===";
-input bool     UseTradingHours   = false;   // Use Trading Hours Filter
-input int      TradeStartHour    = 9;       // Start Hour (24h format)
-input int      TradeEndHour      = 17;      // End Hour (24h format)
-
-input group "=== ADVANCED ===";
-input int      DeviationPoints   = 10;      // Deviation for order execution
-input bool     PrintIndicators   = false;   // Print Indicator Values to Log
-input bool     VerboseLogging   = true;     // Verbose Logging
+input bool   EnableTrading      = true;      // Trading System ON/OFF
+input int     MagicNumber        = 2024;      // Magic Number
+input int     FastEMAPeriod      = 20;        // Fast EMA Period
+input int     SlowEMAPeriod      = 50;        // Slow EMA Period
+input int     ATRPeriod          = 14;        // ATR Period
+input double  ATRMultiplier     = 1.5;       // ATR Multiplier for Stop
+input double  FixedLotSize      = 0.1;       // Fixed Lot Size
+input bool    UseTrailingStop   = true;      // Use ATR Trailing Stop
+input bool    CloseOnOpposite   = true;      // Close on Opposite Signal
+input bool    EnableATRReversal = true;      // Enable ATR Reversal Exit
+input double  ATRReversalThreshold = 1.2;     // ATR Reversal Threshold
+input uint    MaxTradesPerDay   = 5;         // Max Trades Per Day
 
 //+------------------------------------------------------------------+
-//| GLOBAL VARIABLES                                                 |
+//| GLOBAL VARIABLES                                                  |
 //+------------------------------------------------------------------+
-datetime lastTradeTime = 0;
-datetime lastDailyReset = 0;
-int tradesToday = 0;
-bool eaEnabled = false;
+datetime   g_lastTradeTime      = 0;
+datetime   g_lastDailyReset     = 0;
+int        g_tradesToday        = 0;
+bool       g_tradeActive        = false;
+double     g_entryPrice         = 0;
+double     g_entryATR           = 0;
+double     g_currentStop         = 0;
+datetime   g_entryTime          = 0;
+bool       g_isBuyTrade         = false;
 
 //+------------------------------------------------------------------+
-//| ENUMS & STRUCTURES                                               |
+//| Get ATR Value                                                     |
 //+------------------------------------------------------------------+
-enum TradeDirection {
-    TRADE_NONE = 0,
-    TRADE_BUY  = 1,
-    TRADE_SELL = 2
-};
-
-struct TradeState {
-    TradeDirection direction;
-    double        entryPrice;
-    double        entryATR;
-    double        currentStop;
-    datetime      entryTime;
-    bool          isActive;
-};
-
+double GetATR(int period, int shift) {
+    double atrArr[];
+    ArraySetAsSeries(atrArr, true);
+    int handle = iATR(_Symbol, PERIOD_CURRENT, period);
+    if(handle == INVALID_HANDLE) return 0;
+    CopyBuffer(handle, 0, shift, 1, atrArr);
+    IndicatorRelease(handle);
+    return atrArr[0];
+}
 //+------------------------------------------------------------------+
-//| GLOBAL INSTANCES                                                 |
+//| Get EMA Value                                                     |
 //+------------------------------------------------------------------+
-TradeState currentTrade;
-TradeDirection lastDirection = TRADE_NONE;
-
-//+------------------------------------------------------------------+
-//| ATR CALCULATION                                                   |
-//+------------------------------------------------------------------+
-double CalculateATR(int period, int shift = 0) {
-    double tr1 = iHigh(_Symbol, PERIOD_CURRENT, shift) - iLow(_Symbol, PERIOD_CURRENT, shift);
-    double tr2 = MathAbs(iHigh(_Symbol, PERIOD_CURRENT, shift) - iClose(_Symbol, PERIOD_CURRENT, shift + 1));
-    double tr3 = MathAbs(iLow(_Symbol, PERIOD_CURRENT, shift) - iClose(_Symbol, PERIOD_CURRENT, shift + 1));
-
-    double tr = MathMax(tr1, MathMax(tr2, tr3));
-
-    // Use iATR for proper ATR value
-    double atr = iATR(_Symbol, PERIOD_CURRENT, period, shift);
-    return atr;
+double GetEMA(int period, int shift) {
+    double emaArr[];
+    ArraySetAsSeries(emaArr, true);
+    int handle = iMA(_Symbol, PERIOD_CURRENT, period, 0, MODE_EMA, PRICE_CLOSE);
+    if(handle == INVALID_HANDLE) return 0;
+    CopyBuffer(handle, 0, shift, 1, emaArr);
+    IndicatorRelease(handle);
+    return emaArr[0];
 }
 
 //+------------------------------------------------------------------+
-//| EMA CALCULATION                                                   |
+//| Check if EMA Crossover Signal                                     |
 //+------------------------------------------------------------------+
-double CalculateEMA(int period, int shift = 0) {
-    return iMA(_Symbol, PERIOD_CURRENT, period, 0, MODE_EMA, PRICE_CLOSE, shift);
-}
+int CheckSignal() {
+    double emaFast1 = GetEMA(FastEMAPeriod, 1);
+    double emaFast2 = GetEMA(FastEMAPeriod, 2);
+    double emaSlow1 = GetEMA(SlowEMAPeriod, 1);
+    double emaSlow2 = GetEMA(SlowEMAPeriod, 2);
+    double closeArr[];
+    ArraySetAsSeries(closeArr, true);
+    CopyClose(_Symbol, PERIOD_CURRENT, 1, 1, closeArr);
+    double close = closeArr[0];
 
-//+------------------------------------------------------------------+
-//| CHECK TRADE CONDITIONS                                            |
-//+------------------------------------------------------------------+
-TradeDirection CheckTradeConditions() {
-    double emaFastPrev = CalculateEMA(FastEMA_Period, 2);
-    double emaFastCurr = CalculateEMA(FastEMA_Period, 1);
-    double emaSlowPrev = CalculateEMA(SlowEMA_Period, 2);
-    double emaSlowCurr = CalculateEMA(SlowEMA_Period, 1);
-
-    double currClose = iClose(_Symbol, PERIOD_CURRENT, 1);
-    double currATR = CalculateATR(ATR_Period, 1);
-
-    // BUY: Fast EMA crosses above Slow EMA
-    if(emaFastPrev <= emaSlowPrev && emaFastCurr > emaSlowCurr) {
-        if(currClose > emaFastCurr && currClose > emaSlowCurr) {
-            return TRADE_BUY;
+    // BUY: EMA Fast crosses above EMA Slow
+    if(emaFast2 <= emaSlow2 && emaFast1 > emaSlow1) {
+        if(close > emaFast1 && close > emaSlow1) {
+            return 1; // BUY
         }
     }
 
-    // SELL: Fast EMA crosses below Slow EMA
-    if(emaFastPrev >= emaSlowPrev && emaFastCurr < emaSlowCurr) {
-        if(currClose < emaFastCurr && currClose < emaSlowCurr) {
-            return TRADE_SELL;
+    // SELL: EMA Fast crosses below EMA Slow
+    if(emaFast2 >= emaSlow2 && emaFast1 < emaSlow1) {
+        if(close < emaFast1 && close < emaSlow1) {
+            return -1; // SELL
         }
     }
 
-    return TRADE_NONE;
+    return 0; // NO SIGNAL
 }
 
 //+------------------------------------------------------------------+
-//| CHECK ATR REVERSAL                                                |
+//| Check ATR Reversal                                                |
 //+------------------------------------------------------------------+
-bool CheckATRReversal(TradeDirection tradeDir, double entryATR) {
+bool CheckATRReversal() {
     if(!EnableATRReversal) return false;
 
-    double currATR = CalculateATR(ATR_Period, 1);
-    double currClose = iClose(_Symbol, PERIOD_CURRENT, 1);
-    double prevClose = iClose(_Symbol, PERIOD_CURRENT, 2);
+    double currATR = GetATR(ATRPeriod, 1);
+    double prevATR = GetATR(ATRPeriod, 2);
+    double closeArr1[];
+    double closeArr2[];
+    ArraySetAsSeries(closeArr1, true);
+    ArraySetAsSeries(closeArr2, true);
+    CopyClose(_Symbol, PERIOD_CURRENT, 1, 1, closeArr1);
+    CopyClose(_Symbol, PERIOD_CURRENT, 2, 1, closeArr2);
+    double currClose = closeArr1[0];
+    double prevClose = closeArr2[0];
 
-    if(currATR > entryATR * ATRReversalThreshold) {
-        if(tradeDir == TRADE_BUY && currClose < prevClose) {
-            if(VerboseLogging)
-                Print("ATR Reversal: BUY - ATR expanded beyond threshold, price moving against");
-            return true;
-        }
-        if(tradeDir == TRADE_SELL && currClose > prevClose) {
-            if(VerboseLogging)
-                Print("ATR Reversal: SELL - ATR expanded beyond threshold, price moving against");
-            return true;
-        }
+    // ATR expanding and price moving against us
+    if(currATR > g_entryATR * ATRReversalThreshold) {
+        if(g_isBuyTrade && currClose < prevClose) return true;
+        if(!g_isBuyTrade && currClose > prevClose) return true;
     }
 
     return false;
 }
 
 //+------------------------------------------------------------------+
-//| CALCULATE LOT SIZE                                                |
-//+------------------------------------------------------------------+
-double CalculateLotSize() {
-    if(UseFixedLot) {
-        return FixedLotSize;
-    }
-
-    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-    double riskAmount = accountBalance * (MaxRiskPercent / 100.0);
-
-    double atr = CalculateATR(ATR_Period, 1);
-    double stopDistance = atr * ATR_Multiplier;
-
-    if(stopDistance <= 0) {
-        return FixedLotSize;
-    }
-
-    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-
-    if(tickSize == 0) {
-        return FixedLotSize;
-    }
-
-    double pointValue = tickValue / tickSize;
-    double lots = riskAmount / (stopDistance * pointValue);
-
-    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-    double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-
-    lots = MathMax(minLot, MathMin(maxLot, MathFloor(lots / stepLot) * stepLot));
-
-    return lots;
-}
-
-//+------------------------------------------------------------------+
-//| CHECK TRADING HOURS                                               |
-//+------------------------------------------------------------------+
-bool IsWithinTradingHours() {
-    if(!UseTradingHours) return true;
-
-    datetime serverTime = TimeCurrent();
-    MqlDateTime dtStruct;
-    TimeToStruct(serverTime, dtStruct);
-
-    if(dtStruct.hour >= TradeStartHour && dtStruct.hour < TradeEndHour) {
-        return true;
-    }
-
-    return false;
-}
-
-//+------------------------------------------------------------------+
-//| CHECK DAILY TRADE LIMIT                                           |
+//| Can Open Trade                                                    |
 //+------------------------------------------------------------------+
 bool CanOpenTrade() {
     datetime now = TimeCurrent();
-    MqlDateTime today;
-    TimeToStruct(now, today);
+    MqlDateTime dt;
+    TimeToStruct(now, dt);
 
-    string dateKey = StringFormat("%04d%02d%02d", today.year, today.mon, today.day);
+    string dateStr = StringFormat("%04d%02d%02d", dt.year, dt.mon, dt.day);
 
-    if(lastDailyReset != StringToTime(dateKey)) {
-        tradesToday = 0;
-        lastDailyReset = StringToTime(dateKey);
+    if(g_lastDailyReset != StringToTime(dateStr)) {
+        g_tradesToday = 0;
+        g_lastDailyReset = StringToTime(dateStr);
     }
 
-    if(tradesToday >= MaxTradesPerDay) {
-        if(VerboseLogging)
-            Print("Daily trade limit reached: ", MaxTradesPerDay);
-        return false;
-    }
+    if(g_tradesToday >= MaxTradesPerDay) return false;
 
     return true;
 }
 
 //+------------------------------------------------------------------+
-//| OPEN TRADE                                                        |
+//| Open Trade                                                        |
 //+------------------------------------------------------------------+
-bool OpenTrade(TradeDirection tradeDir) {
-    if(tradeDir == TRADE_NONE) return false;
-    if(!CanOpenTrade()) return false;
-    if(!IsWithinTradingHours()) return false;
+bool OpenTrade(bool isBuy) {
     if(!EnableTrading) return false;
+    if(!CanOpenTrade()) return false;
 
-    double lotSize = CalculateLotSize();
-    double atr = CalculateATR(ATR_Period, 1);
-    double stopDistance = atr * ATR_Multiplier;
+    double lotSize = FixedLotSize;
+    double atr = GetATR(ATRPeriod, 1);
+    double stopDist = atr * ATRMultiplier;
 
-    double askPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double bidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-    double entryPrice = 0;
-    double stopLoss = 0;
-
-    ENUM_ORDER_TYPE orderType;
-    ENUM_ORDER_TYPE_FILLING fillingType = ORDER_FILLING_FOK;
-
-    if(tradeDir == TRADE_BUY) {
-        entryPrice = askPrice;
-        orderType = ORDER_TYPE_BUY;
-        stopLoss = entryPrice - stopDistance;
-
-        double minStop = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-        if(stopLoss < bidPrice - minStop) {
-            stopLoss = bidPrice - minStop;
-        }
-    } else if(tradeDir == TRADE_SELL) {
-        entryPrice = bidPrice;
-        orderType = ORDER_TYPE_SELL;
-        stopLoss = entryPrice + stopDistance;
-
-        double minStop = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-        if(stopLoss > askPrice + minStop) {
-            stopLoss = askPrice + minStop;
-        }
-    }
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double price = isBuy ? ask : bid;
+    double stopLoss = isBuy ? price - stopDist : price + stopDist;
 
     MqlTradeRequest request = {};
     MqlTradeResult result = {};
@@ -282,65 +160,46 @@ bool OpenTrade(TradeDirection tradeDir) {
     request.magic = MagicNumber;
     request.symbol = _Symbol;
     request.volume = lotSize;
-    request.type = orderType;
-    request.price = entryPrice;
+    request.type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    request.price = price;
     request.sl = stopLoss;
-    request.tp = 0;
-    request.deviation = DeviationPoints;
-    request.type_filling = fillingType;
-    request.comment = "VantageEMAATR";
+    request.deviation = 10;
+    request.type_filling = ORDER_FILLING_FOK;
+    request.comment = "VantageEMA";
 
     bool success = OrderSend(request, result);
 
     if(success && result.retcode == TRADE_RETCODE_DONE) {
-        currentTrade.direction = tradeDir;
-        currentTrade.entryPrice = entryPrice;
-        currentTrade.entryATR = atr;
-        currentTrade.currentStop = stopLoss;
-        currentTrade.entryTime = TimeCurrent();
-        currentTrade.isActive = true;
-
-        tradesToday++;
-        lastTradeTime = TimeCurrent();
-        lastDirection = tradeDir;
-
-        if(VerboseLogging) {
-            Print("Trade OPENED: ", tradeDir == TRADE_BUY ? "BUY" : "SELL",
-                  " at ", entryPrice,
-                  " Lots: ", lotSize,
-                  " Stop: ", stopLoss,
-                  " ATR: ", atr);
-        }
-
+        g_tradeActive = true;
+        g_isBuyTrade = isBuy;
+        g_entryPrice = price;
+        g_entryATR = atr;
+        g_currentStop = stopLoss;
+        g_entryTime = TimeCurrent();
+        g_tradesToday++;
+        Print("Trade Opened: ", isBuy ? "BUY" : "SELL", " at ", price, " SL: ", stopLoss);
         return true;
     } else {
-        if(VerboseLogging) {
-            Print("Trade FAILED: ", result.comment,
-                  " Retcode: ", result.retcode);
-        }
+        Print("Order Failed: ", result.comment);
         return false;
     }
 }
 
 //+------------------------------------------------------------------+
-//| CLOSE TRADE                                                      |
+//| Close Trade                                                       |
 //+------------------------------------------------------------------+
 bool CloseTrade(string reason) {
-    if(!currentTrade.isActive) return false;
+    if(!g_tradeActive) return false;
 
     if(!PositionSelect(_Symbol)) {
-        currentTrade.isActive = false;
-        currentTrade.direction = TRADE_NONE;
-        return false;
+        g_tradeActive = false;
+        return true;
     }
 
-    double lotSize = PositionGetDouble(POSITION_VOLUME);
-    ENUM_ORDER_TYPE orderType = (currentTrade.direction == TRADE_BUY) ?
-                               ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-
-    double closePrice = (currentTrade.direction == TRADE_BUY) ?
-                       SymbolInfoDouble(_Symbol, SYMBOL_BID) :
-                       SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    ENUM_ORDER_TYPE closeType = g_isBuyTrade ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+    double closePrice = g_isBuyTrade ? SymbolInfoDouble(_Symbol, SYMBOL_BID) :
+                                       SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
     MqlTradeRequest request = {};
     MqlTradeResult result = {};
@@ -348,230 +207,177 @@ bool CloseTrade(string reason) {
     request.action = TRADE_ACTION_DEAL;
     request.magic = MagicNumber;
     request.symbol = _Symbol;
-    request.volume = lotSize;
-    request.type = orderType;
+    request.volume = volume;
+    request.type = closeType;
     request.price = closePrice;
-    request.deviation = DeviationPoints;
+    request.deviation = 10;
     request.comment = reason;
 
     bool success = OrderSend(request, result);
 
     if(success && result.retcode == TRADE_RETCODE_DONE) {
-        if(VerboseLogging) {
-            double pnl = result.profit;
-            Print("Trade CLOSED: ", reason,
-                  " P&L: ", pnl);
-        }
-
-        currentTrade.isActive = false;
-        currentTrade.direction = TRADE_NONE;
+        Print("Trade Closed: ", reason, " Profit: ", result.profit);
+        g_tradeActive = false;
         return true;
-    } else {
-        if(VerboseLogging) {
-            Print("Close FAILED: ", result.comment);
-        }
-        return false;
     }
+
+    return false;
 }
 
 //+------------------------------------------------------------------+
-//| UPDATE TRAILING STOP                                              |
+//| Update Trailing Stop                                              |
 //+------------------------------------------------------------------+
 void UpdateTrailingStop() {
-    if(!currentTrade.isActive) return;
+    if(!g_tradeActive) return;
     if(!UseTrailingStop) return;
 
-    double currATR = CalculateATR(ATR_Period, 1);
-    double currClose = iClose(_Symbol, PERIOD_CURRENT, 1);
+    double atr = GetATR(ATRPeriod, 1);
+    double closeArr[];
+    ArraySetAsSeries(closeArr, true);
+    CopyClose(_Symbol, PERIOD_CURRENT, 1, 1, closeArr);
+    double close = closeArr[0];
 
-    if(currentTrade.direction == TRADE_BUY) {
-        double newStop = currClose - (currATR * ATR_Multiplier);
-
-        if(newStop > currentTrade.currentStop) {
-            if(!PositionSelect(_Symbol)) return;
-
-            MqlTradeRequest request = {};
-            MqlTradeResult result = {};
-
-            request.action = TRADE_ACTION_SLLOW;
-            request.magic = MagicNumber;
-            request.symbol = _Symbol;
-            request.sl = newStop;
-            request.position = PositionGetInteger(POSITION_TICKET);
-
-            if(OrderSend(request, result) && result.retcode == TRADE_RETCODE_DONE) {
-                currentTrade.currentStop = newStop;
-
-                if(VerboseLogging) {
-                    Print("Trailing Stop UPDATED: BUY - New Stop: ", newStop);
-                }
+    if(g_isBuyTrade) {
+        double newStop = close - (atr * ATRMultiplier);
+        if(newStop > g_currentStop) {
+            if(PositionSelect(_Symbol)) {
+                MqlTradeRequest request = {};
+                MqlTradeResult result = {};
+                request.action = TRADE_ACTION_SLLOW;
+                request.magic = MagicNumber;
+                request.symbol = _Symbol;
+                request.sl = newStop;
+                request.position = PositionGetInteger(POSITION_TICKET);
+                OrderSend(request, result);
+                g_currentStop = newStop;
             }
         }
-    } else if(currentTrade.direction == TRADE_SELL) {
-        double newStop = currClose + (currATR * ATR_Multiplier);
-
-        if(newStop < currentTrade.currentStop) {
-            if(!PositionSelect(_Symbol)) return;
-
-            MqlTradeRequest request = {};
-            MqlTradeResult result = {};
-
-            request.action = TRADE_ACTION_SLLOW;
-            request.magic = MagicNumber;
-            request.symbol = _Symbol;
-            request.sl = newStop;
-            request.position = PositionGetInteger(POSITION_TICKET);
-
-            if(OrderSend(request, result) && result.retcode == TRADE_RETCODE_DONE) {
-                currentTrade.currentStop = newStop;
-
-                if(VerboseLogging) {
-                    Print("Trailing Stop UPDATED: SELL - New Stop: ", newStop);
-                }
-            }
-        }
-    }
-}
-
-//+------------------------------------------------------------------+
-//| CHECK EXISTING POSITIONS                                          |
-//+------------------------------------------------------------------+
-void CheckExistingPositions() {
-    if(PositionSelect(_Symbol)) {
-        currentTrade.direction = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ?
-                                  TRADE_BUY : TRADE_SELL;
-        currentTrade.entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-        currentTrade.entryTime = (datetime)PositionGetInteger(POSITION_TIME);
-        currentTrade.currentStop = PositionGetDouble(POSITION_SL);
-        currentTrade.isActive = true;
-
-        double atr = CalculateATR(ATR_Period, 1);
-        currentTrade.entryATR = atr;
     } else {
-        currentTrade.isActive = false;
-        currentTrade.direction = TRADE_NONE;
+        double newStop = close + (atr * ATRMultiplier);
+        if(newStop < g_currentStop) {
+            if(PositionSelect(_Symbol)) {
+                MqlTradeRequest request = {};
+                MqlTradeResult result = {};
+                request.action = TRADE_ACTION_SLLOW;
+                request.magic = MagicNumber;
+                request.symbol = _Symbol;
+                request.sl = newStop;
+                request.position = PositionGetInteger(POSITION_TICKET);
+                OrderSend(request, result);
+                g_currentStop = newStop;
+            }
+        }
     }
 }
 
 //+------------------------------------------------------------------+
-//| EXPERT ON TICKET                                                  |
+//| Check Existing Position                                           |
+//+------------------------------------------------------------------+
+void CheckExistingPosition() {
+    if(PositionSelect(_Symbol)) {
+        g_tradeActive = true;
+        g_isBuyTrade = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+        g_entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        g_entryTime = (datetime)PositionGetInteger(POSITION_TIME);
+        g_currentStop = PositionGetDouble(POSITION_SL);
+        g_entryATR = GetATR(ATRPeriod, 1);
+    } else {
+        g_tradeActive = false;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                              |
 //+------------------------------------------------------------------+
 void OnTick() {
+    // Check if trading is disabled
     if(!EnableTrading) {
-        if(currentTrade.isActive) {
+        if(g_tradeActive) {
             CloseTrade("EA Disabled");
         }
         return;
     }
 
-    CheckExistingPositions();
+    // Check existing position
+    CheckExistingPosition();
 
-    if(currentTrade.isActive) {
+    if(g_tradeActive) {
+        // Update trailing stop
         UpdateTrailingStop();
 
-        double currClose = iClose(_Symbol, PERIOD_CURRENT, 1);
-        double currLow = iLow(_Symbol, PERIOD_CURRENT, 1);
-        double currHigh = iHigh(_Symbol, PERIOD_CURRENT, 1);
+        double lowArr[];
+        double highArr[];
+        ArraySetAsSeries(lowArr, true);
+        ArraySetAsSeries(highArr, true);
+        CopyLow(_Symbol, PERIOD_CURRENT, 1, 1, lowArr);
+        CopyHigh(_Symbol, PERIOD_CURRENT, 1, 1, highArr);
+        double low = lowArr[0];
+        double high = highArr[0];
 
-        if(currentTrade.direction == TRADE_BUY) {
-            double stopLevel = currentTrade.currentStop;
-
-            if(currLow <= stopLevel) {
-                CloseTrade("ATR Stop Hit");
+        // Check stop loss
+        if(g_isBuyTrade) {
+            if(low <= g_currentStop) {
+                CloseTrade("Stop Loss");
                 return;
             }
-
-            if(CheckATRReversal(TRADE_BUY, currentTrade.entryATR)) {
-                CloseTrade("ATR Reversal");
+        } else {
+            if(high >= g_currentStop) {
+                CloseTrade("Stop Loss");
                 return;
-            }
-
-            if(CloseOnOpposite) {
-                TradeDirection signal = CheckTradeConditions();
-                if(signal == TRADE_SELL) {
-                    CloseTrade("Opposite Signal");
-                    return;
-                }
             }
         }
-        else if(currentTrade.direction == TRADE_SELL) {
-            double stopLevel = currentTrade.currentStop;
 
-            if(currHigh >= stopLevel) {
-                CloseTrade("ATR Stop Hit");
+        // Check ATR reversal
+        if(CheckATRReversal()) {
+            CloseTrade("ATR Reversal");
+            return;
+        }
+
+        // Check opposite signal
+        if(CloseOnOpposite) {
+            int signal = CheckSignal();
+            if(g_isBuyTrade && signal == -1) {
+                CloseTrade("Opposite Signal");
                 return;
             }
-
-            if(CheckATRReversal(TRADE_SELL, currentTrade.entryATR)) {
-                CloseTrade("ATR Reversal");
+            if(!g_isBuyTrade && signal == 1) {
+                CloseTrade("Opposite Signal");
                 return;
-            }
-
-            if(CloseOnOpposite) {
-                TradeDirection signal = CheckTradeConditions();
-                if(signal == TRADE_BUY) {
-                    CloseTrade("Opposite Signal");
-                    return;
-                }
             }
         }
-    }
-    else {
-        TradeDirection signal = CheckTradeConditions();
 
-        if(signal != TRADE_NONE) {
-            OpenTrade(signal);
+    } else {
+        // Check for new signal
+        int signal = CheckSignal();
+        if(signal == 1) {
+            OpenTrade(true); // BUY
+        } else if(signal == -1) {
+            OpenTrade(false); // SELL
         }
     }
 }
 
 //+------------------------------------------------------------------+
-//| EXPERT ON INIT                                                    |
+//| Expert initialization function                                    |
 //+------------------------------------------------------------------+
 int OnInit() {
-    eaEnabled = EnableTrading;
+    Print("========================================");
+    Print("Vantage EMA ATR Trading System");
+    Print("Symbol: ", _Symbol);
+    Print("Enable Trading: ", EnableTrading);
+    Print("Fast EMA: ", FastEMAPeriod);
+    Print("Slow EMA: ", SlowEMAPeriod);
+    Print("ATR Period: ", ATRPeriod);
+    Print("ATR Multiplier: ", ATRMultiplier);
+    Print("========================================");
 
-    if(VerboseLogging) {
-        Print("========================================");
-        Print("Vantage EMA ATR Trading System");
-        Print("EA Initialized on: ", _Symbol);
-        Print("Fast EMA: ", FastEMA_Period);
-        Print("Slow EMA: ", SlowEMA_Period);
-        Print("ATR Period: ", ATR_Period);
-        Print("ATR Multiplier: ", ATR_Multiplier);
-        Print("ATR Reversal: ", EnableATRReversal);
-        Print("Lot Size: ", FixedLotSize);
-        Print("Trading Enabled: ", EnableTrading);
-        Print("========================================");
-    }
-
-    CheckExistingPositions();
-
-    return(INIT_SUCCEEDED);
+    CheckExistingPosition();
+    return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
-//| EXPERT ON DEINIT                                                  |
+//| Expert deinitialization function                                  |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
-    if(VerboseLogging) {
-        Print("EA Deinitialized. Reason: ", reason);
-    }
+    Print("EA Removed. Reason: ", reason);
 }
-
-//+------------------------------------------------------------------+
-//| EXPERT ON CALCULATE                                                |
-//+------------------------------------------------------------------+
-int OnCalculate(const int rates_total,
-               const int prev_calculated,
-               const datetime &time[],
-               const double &open[],
-               const double &high[],
-               const double &low[],
-               const double &close[],
-               const long &tick_volume[],
-               const long &volume[],
-               const double &spread[]) {
-    return rates_total;
-}
-//+------------------------------------------------------------------+

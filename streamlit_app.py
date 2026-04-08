@@ -107,6 +107,9 @@ def init_session_state():
         'last_lot': 0.1,
         'last_atr': 1.5,
         'recent_symbols': [],
+        'open_trades': [],        # trades from backtest with exit_reason == 'End of Data'
+        'last_scan_results': [],  # results from the signal scanner
+        'last_scan_time': None,  # when scan was last run
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -750,7 +753,21 @@ if run:
     with st.spinner("📊 Running backtest..."):
         try:
             trades = run_backtest(df, atr_multiplier)
-            summary = calculate_summary(trades, symbol, lot_size)
+            summary = calculate_summary(closed_trades, symbol, lot_size)
+
+            # Separate open trades (End of Data) from closed trades
+            open_trades = [t for t in trades if t.get('exit_reason') == 'End of Data']
+            closed_trades = [t for t in trades if t.get('exit_reason') != 'End of Data']
+
+            # Store open trades in session state for the Running Trades tab
+            for t in open_trades:
+                t['symbol'] = symbol
+                t['symbol_name'] = selected_symbol
+                t['interval'] = timeframe
+                t['atr_mult'] = atr_multiplier
+                t['lot_size'] = lot_size
+            st.session_state['open_trades'] = open_trades
+            st.session_state['last_backtest_closed'] = closed_trades
         except Exception as e:
             st.error(f"❌ {str(e)}")
             st.stop()
@@ -829,10 +846,10 @@ if run:
         a4.metric("Worst Trade", f"{summary['largest_loss']:.5f}", delta_color="inverse")
 
     with tab2:
-        if trades:
+        if closed_trades:
             equity_data = []
             cumulative = 0
-            for t in trades:
+            for t in closed_trades:
                 cumulative += t['pnl_points']
                 equity_data.append({
                     'time': t['exit_time'].strftime('%Y-%m-%d') if hasattr(t['exit_time'], 'strftime') else str(t['exit_time']),
@@ -867,9 +884,10 @@ if run:
             st.info("No trades to display")
 
     with tab3:
-        if trades:
+        closed_trades = st.session_state.get('last_backtest_closed', [])
+        if closed_trades:
             display_trades = []
-            for t in trades:
+            for t in closed_trades:
                 pnl_money = calculate_pnl_money(t['pnl_points'], symbol, lot_size)
                 investment = calculate_investment(symbol, t['entry_price'], lot_size)
                 roi = calculate_roi(pnl_money, investment)
@@ -927,184 +945,270 @@ if run:
             st.warning("⚠️ No trades found")
 
     with tab4:
-        st.markdown("### 🔍 Live Signal Scanner")
-        st.caption("EMA 20/50 Crossover signals detected across all pairs and timeframes")
+        st.markdown("### 📊 Your Running Positions")
+        st.caption("Open trades from your last backtest — live P&L, SL, TP and trailing stops")
 
-        if not scan_timeframes:
-            st.warning("Select at least one timeframe above to scan.")
-        elif not scan_categories:
-            st.warning("Select at least one category (Forex/Crypto/Stocks) to scan.")
+        open_trades = st.session_state.get('open_trades', [])
+
+        if not open_trades:
+            st.info("👆 No open positions found. Run a backtest — trades still open at the end of the data will appear here as running positions.")
         else:
-            pairs_to_scan = {}
-            for cat in scan_categories:
-                if cat in SYMBOLS:
-                    pairs_to_scan.update(SYMBOLS[cat])
+            # Live price fetch for all open trades
+            with st.spinner("📡 Fetching live prices..."):
+                live_data = {}
+                for t in open_trades:
+                    sym = t.get('symbol', '')
+                    tf = t.get('interval', '1h')
+                    try:
+                        ticker = yf.Ticker(sym)
+                        # Use short period for speed
+                        live_df = ticker.history(period='5d', interval=tf if tf != '1d' else '1d')
+                        if live_df is not None and not live_df.empty:
+                            live_data[sym] = live_df.iloc[-1].to_dict()
+                            live_data[sym]['fetched_at'] = live_df.index[-1]
+                    except Exception:
+                        pass
 
-            with st.spinner(f"🔎 Scanning {len(pairs_to_scan)} pairs across {len(scan_timeframes)} timeframes..."):
-                running_trades = find_running_trades(
-                    pairs_to_scan,
-                    scan_timeframes,
-                    atr_multiplier=scan_atr
-                )
+            st.success(f"📊 {len(open_trades)} open position(s) — live data loaded")
 
-            if not running_trades:
-                st.info("🤷 No active crossover signals found at the moment. Try different timeframes or wait for new signals.")
-            else:
-                st.success(f"🎯 Found {len(running_trades)} active signal(s)")
+            # ---- Summary metrics ----
+            total_pnl = 0
+            total_investment = 0
+            for t in open_trades:
+                sym = t.get('symbol', '')
+                ep = t.get('entry_price', 0)
+                lr = live_data.get(sym, {})
+                cp = lr.get('Close', ep)
+                atr_mult = t.get('atr_mult', 1.5)
 
-                # Summary metrics
-                buy_signals = [r for r in running_trades if r['direction'] == 'BUY']
-                sell_signals = [r for r in running_trades if r['direction'] == 'SELL']
-                c1, c2, c3 = st.columns(3)
-                c1.metric("📈 BUY Signals", len(buy_signals))
-                c2.metric("📉 SELL Signals", len(sell_signals))
-                c3.metric("⏱ Total Scanned", len(pairs_to_scan) * len(scan_timeframes))
-
-                st.divider()
-
-                # Build display table
-                rows = []
-                for r in running_trades:
-                    # Current P&L if we entered at crossover
-                    cross_price = (r['cross_high'] + r['cross_low']) / 2
-                    if r['direction'] == 'BUY':
-                        pnl_pts = r['current_price'] - cross_price
-                        sl_dist = r['current_price'] - r['sl']
-                        reward = r['tp'] - r['current_price']
-                        rr = round(reward / sl_dist, 2) if sl_dist > 0 else 0
+                # Calculate ATR from recent data
+                try:
+                    ticker = yf.Ticker(sym)
+                    df_atr = ticker.history(period='30d', interval=tf if tf != '1d' else '1d')
+                    if not df_atr.empty:
+                        hl = df_atr['High'] - df_atr['Low']
+                        hc = np.abs(df_atr['High'] - df_atr['Close'].shift())
+                        lc = np.abs(df_atr['Low'] - df_atr['Close'].shift())
+                        tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+                        curr_atr = tr.rolling(14).mean().iloc[-1]
                     else:
-                        pnl_pts = cross_price - r['current_price']
-                        sl_dist = r['sl'] - r['current_price']
-                        reward = r['current_price'] - r['tp']
-                        rr = round(reward / sl_dist, 2) if sl_dist > 0 else 0
+                        curr_atr = 0
+                except:
+                    curr_atr = 0
 
-                    pnl_color = '#3fb950' if pnl_pts >= 0 else '#f85149'
-                    dir_color = '#3fb950' if r['direction'] == 'BUY' else '#f85149'
-                    sign = '+' if pnl_pts >= 0 else ''
+                if t['direction'] == 'BUY':
+                    pnl_pts = cp - ep
+                    sl = cp - (atr_mult * curr_atr)
+                    tp = cp + (2.0 * atr_mult * curr_atr)
+                else:
+                    pnl_pts = ep - cp
+                    sl = cp + (atr_mult * curr_atr)
+                    tp = cp - (2.0 * atr_mult * curr_atr)
+
+                lot = t.get('lot_size', 0.1)
+                pnl_money = calculate_pnl_money(pnl_pts, sym, lot)
+                invest = calculate_investment(sym, ep, lot)
+                total_pnl += pnl_money
+                total_investment += invest
+
+            win_count = 0
+            for t in open_trades:
+                sym = t.get('symbol', '')
+                ep = t.get('entry_price', 0)
+                cp = live_data.get(sym, {}).get('Close', ep)
+                pnl_pts = (cp - ep) if t['direction'] == 'BUY' else (ep - cp)
+                if pnl_pts > 0:
+                    win_count += 1
+
+            c1, c2, c3, c4 = st.columns(4)
+            pnl_color = "normal" if total_pnl >= 0 else "inverse"
+            c1.metric("Open Positions", len(open_trades))
+            c2.metric("Winning", win_count, delta_color="normal")
+            c3.metric("Losing", len(open_trades) - win_count, delta_color="inverse")
+            c4.metric("Total P&L", f"${total_pnl:.2f}", delta_color=pnl_color)
+
+            st.divider()
+
+            # ---- Per-trade live card ----
+            st.markdown("#### 🎯 Open Positions — Live Management")
+            for i, t in enumerate(open_trades):
+                sym = t.get('symbol', '')
+                ep = t.get('entry_price', 0)
+                tf = t.get('interval', '1h')
+                atr_mult = t.get('atr_mult', 1.5)
+                direction = t['direction']
+                entry_time = t.get('entry_time')
+                lr = live_data.get(sym, {})
+                cp = lr.get('Close', ep)
+
+                # Recalculate ATR from recent data
+                try:
+                    ticker = yf.Ticker(sym)
+                    df_atr = ticker.history(period='30d', interval=tf if tf != '1d' else '1d')
+                    if not df_atr.empty:
+                        hl = df_atr['High'] - df_atr['Low']
+                        hc = np.abs(df_atr['High'] - df_atr['Close'].shift())
+                        lc = np.abs(df_atr['Low'] - df_atr['Close'].shift())
+                        tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+                        curr_atr = float(tr.rolling(14).mean().iloc[-1])
+                    else:
+                        curr_atr = 0.0
+                except:
+                    curr_atr = 0.0
+
+                if direction == 'BUY':
+                    pnl_pts = cp - ep
+                    sl = cp - (atr_mult * curr_atr)
+                    tp = cp + (2.0 * atr_mult * curr_atr)
+                    trailing_25 = sl + (cp - sl) * 0.25
+                    trailing_50 = sl + (cp - sl) * 0.50
+                    trailing_75 = sl + (cp - sl) * 0.75
+                    sl_dist = cp - sl
+                    reward = tp - cp
+                    rr = round(reward / sl_dist, 2) if sl_dist > 0 else 0
+                else:
+                    pnl_pts = ep - cp
+                    sl = cp + (atr_mult * curr_atr)
+                    tp = cp - (2.0 * atr_mult * curr_atr)
+                    trailing_25 = cp - (atr_mult * curr_atr * 0.25)
+                    trailing_50 = cp - (atr_mult * curr_atr * 0.50)
+                    trailing_75 = cp - (atr_mult * curr_atr * 0.75)
+                    sl_dist = sl - cp
+                    reward = cp - tp
+                    rr = round(reward / sl_dist, 2) if sl_dist > 0 else 0
+
+                lot = t.get('lot_size', 0.1)
+                pnl_money = calculate_pnl_money(pnl_pts, sym, lot)
+                invest = calculate_investment(sym, ep, lot)
+                roi = calculate_roi(pnl_money, invest)
+                pnl_color = '#3fb950' if pnl_money >= 0 else '#f85149'
+                dir_color = '#3fb950' if direction == 'BUY' else '#f85149'
+                sign = '+' if pnl_money >= 0 else ''
+
+                entry_str = entry_time.strftime('%m/%d %H:%M') if hasattr(entry_time, 'strftime') else str(entry_time)
+                fetched_str = lr.get('fetched_at', 'N/A')
+                if hasattr(fetched_str, 'strftime'):
+                    fetched_str = fetched_str.strftime('%Y-%m-%d %H:%M')
+
+                # Age of trade
+                try:
+                    if hasattr(entry_time, 'strftime'):
+                        fetched_dt = lr.get('fetched_at', None)
+                        if fetched_dt and hasattr(fetched_dt, 'strftime'):
+                            age = (fetched_dt - entry_time)
+                            age_str = f"{int(age.total_seconds() / 3600)}h"
+                        else:
+                            age_str = "N/A"
+                    else:
+                        age_str = "N/A"
+                except:
+                    age_str = "N/A"
+
+                with st.expander(
+                    f"🔸 {t.get('symbol_name', sym)} {tf} | {direction} | Entry: {ep:.5f} | Curr: {cp:.5f} | P&L: {sign}${pnl_money:.2f} ({sign}{roi:.1f}%)",
+                    expanded=True
+                ):
+                    ca, cb, cc, cd = st.columns(4)
+                    with ca:
+                        st.markdown(f"**Direction** <span style='color:{dir_color};font-weight:700'>{direction}</span>", unsafe_allow_html=True)
+                        st.markdown(f"**Entry Price** `{ep:.5f}`")
+                        st.markdown(f"**Entry Time** `{entry_str}`")
+                        st.markdown(f"**Age** `{age_str}`")
+                    with cb:
+                        st.markdown(f"**Current Price** `{cp:.5f}`")
+                        st.markdown(f"**Data As Of** `{fetched_str}`")
+                        st.markdown(f"**ATR ({atr_mult}×)** `{curr_atr:.5f}`")
+                        rr_c = '#3fb950' if rr >= 1.5 else ('#e3b341' if rr >= 1 else '#f85149')
+                        st.markdown(f"**R:R Ratio** <span style='color:{rr_c};font-weight:700'>{rr}</span>", unsafe_allow_html=True)
+                    with cc:
+                        st.markdown(f"**Stop Loss** `{sl:.5f}`")
+                        st.markdown(f"**Take Profit** `{tp:.5f}`")
+                        st.markdown(f"**SL Distance** `{sl_dist:.5f}`")
+                        st.markdown(f"**TP Distance** `{reward:.5f}`")
+                    with cd:
+                        pnl_disp = f"{sign}${pnl_money:.2f}"
+                        roi_disp = f"{sign}{roi:.2f}%"
+                        st.metric("Live P&L ($)", pnl_disp, delta_color="normal" if pnl_money >= 0 else "inverse")
+                        st.metric("Live ROI", roi_disp, delta_color="normal" if roi >= 0 else "inverse")
+
+                    st.markdown("**Trailing Stop Levels**")
+                    t1, t2, t3, t4 = st.columns(4)
+                    with t1:
+                        st.metric("Initial SL", f"{sl:.5f}")
+                    with t2:
+                        st.metric("T25%", f"{trailing_25:.5f}")
+                    with t3:
+                        st.metric("T50%", f"{trailing_50:.5f}")
+                    with t4:
+                        st.metric("T75%", f"{trailing_75:.5f}")
+
+                    # Action buttons
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        if st.button(f"✅ Mark Closed #{i+1}", key=f"close_{i}"):
+                            open_trades.pop(i)
+                            st.session_state['open_trades'] = open_trades
+                            st.rerun()
+                    with a2:
+                        if st.button(f"📋 Duplicate to Scanner #{i+1}", key=f"dup_{i}"):
+                            st.session_state['last_scan_results'] = [t]
+                            st.rerun()
+
+            # Export open trades
+            if open_trades:
+                rows = []
+                for t in open_trades:
+                    sym = t.get('symbol', '')
+                    ep = t.get('entry_price', 0)
+                    cp = live_data.get(sym, {}).get('Close', ep)
+                    lr = live_data.get(sym, {})
+                    direction = t['direction']
+                    atr_mult = t.get('atr_mult', 1.5)
+                    try:
+                        ticker = yf.Ticker(sym)
+                        df_atr = ticker.history(period='30d', interval=t.get('interval', '1h'))
+                        hl = df_atr['High'] - df_atr['Low']
+                        hc = np.abs(df_atr['High'] - df_atr['Close'].shift())
+                        lc = np.abs(df_atr['Low'] - df_atr['Close'].shift())
+                        tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+                        curr_atr = float(tr.rolling(14).mean().iloc[-1])
+                    except:
+                        curr_atr = 0.0
+
+                    if direction == 'BUY':
+                        pnl_pts = cp - ep
+                        sl = cp - (atr_mult * curr_atr)
+                        tp = cp + (2.0 * atr_mult * curr_atr)
+                    else:
+                        pnl_pts = ep - cp
+                        sl = cp + (atr_mult * curr_atr)
+                        tp = cp - (2.0 * atr_mult * curr_atr)
+
+                    lot = t.get('lot_size', 0.1)
+                    pnl_m = calculate_pnl_money(pnl_pts, sym, lot)
+                    invest = calculate_investment(sym, ep, lot)
+                    roi = calculate_roi(pnl_m, invest)
+                    entry_time = t.get('entry_time')
+                    entry_str = entry_time.strftime('%Y-%m-%d %H:%M') if hasattr(entry_time, 'strftime') else str(entry_time)
 
                     rows.append({
-                        'Pair': r['symbol'],
-                        'TF': r['interval'],
-                        'Dir': r['direction'],
-                        'Stage': r['stage'],
-                        'Cross Price': f"{cross_price:.5f}",
-                        'Curr Price': f"{r['current_price']:.5f}",
-                        'EMA20': f"{r['ema_20']:.5f}",
-                        'EMA50': f"{r['ema_50']:.5f}",
-                        'ATR': f"{r['atr']:.5f}",
-                        'SL': f"{r['sl']:.5f}",
-                        'TP': f"{r['tp']:.5f}",
-                        'T25%': f"{r['trailing_25']:.5f}",
-                        'T50%': f"{r['trailing_50']:.5f}",
-                        'T75%': f"{r['trailing_75']:.5f}",
-                        'R:R': rr,
-                        'Mvt%': f"{sign}{r['move_from_cross_pct']:.2f}%",
-                        'Pullback': '✅' if r['in_pullback'] else '❌',
-                        'Trend': '✅' if r['trend_confirmed'] else '❌',
+                        'Symbol': t.get('symbol_name', sym),
+                        'Yahoo': sym,
+                        'Direction': direction,
+                        'Entry Time': entry_str,
+                        'Entry Price': round(ep, 5),
+                        'Current Price': round(cp, 5),
+                        'ATR': round(curr_atr, 5),
+                        'ATR Mult': atr_mult,
+                        'SL': round(sl, 5),
+                        'TP': round(tp, 5),
+                        'P&L ($)': round(pnl_m, 2),
+                        'ROI %': round(roi, 2),
                     })
 
-                df_runs = pd.DataFrame(rows)
-
-                # Render as styled table
-                st.markdown("#### 🎯 Active Signals")
-                html = '<table class="trade-table">'
-                html += '<thead><tr>'
-                for h in df_runs.columns:
-                    html += f'<th>{h}</th>'
-                html += '</tr></thead><tbody>'
-
-                for _, row in df_runs.iterrows():
-                    dir_val = row['Dir']
-                    dir_color = '#3fb950' if dir_val == 'BUY' else '#f85149'
-                    html += '<tr>'
-                    html += f"<td style='font-weight:600;'>{row['Pair']}</td>"
-                    html += f"<td style='color:#58a6ff;'>{row['TF']}</td>"
-                    html += f"<td style='color:{dir_color};font-weight:700;'>{dir_val}</td>"
-                    html += f"<td style='color:#e3b341;'>{row['Stage']}</td>"
-                    html += f"<td>{row['Cross Price']}</td>"
-                    html += f"<td style='font-weight:600;'>{row['Curr Price']}</td>"
-                    html += f"<td>{row['EMA20']}</td>"
-                    html += f"<td>{row['EMA50']}</td>"
-                    html += f"<td>{row['ATR']}</td>"
-                    html += f"<td style='color:#f85149;'>{row['SL']}</td>"
-                    html += f"<td style='color:#3fb950;'>{row['TP']}</td>"
-                    html += f"<td style='color:#8b949e;'>{row['T25%']}</td>"
-                    html += f"<td style='color:#8b949e;'>{row['T50%']}</td>"
-                    html += f"<td style='color:#8b949e;'>{row['T75%']}</td>"
-                    rr_val = row['R:R']
-                    rr_color = '#3fb950' if float(rr_val) >= 1.5 else ('#e3b341' if float(rr_val) >= 1 else '#f85149')
-                    html += f"<td style='color:{rr_color};font-weight:600;'>{rr_val}</td>"
-                    mvt = row['Mvt%']
-                    mvt_color = '#3fb950' if not mvt.startswith('-') else '#f85149'
-                    html += f"<td style='color:{mvt_color};'>{mvt}</td>"
-                    pb = row['Pullback']
-                    html += f"<td>{pb}</td>"
-                    trend = row['Trend']
-                    html += f"<td>{trend}</td>"
-                    html += '</tr>'
-
-                html += '</tbody></table>'
-                st.markdown(html, unsafe_allow_html=True)
-
-                # Export
-                csv_run = df_runs.to_csv(index=False)
-                st.download_button(
-                    "📥 Export Signals CSV",
-                    csv_run,
-                    "running_signals.csv",
-                    "text/csv",
-                    key='dl_signals'
-                )
-
-                # ---- Detailed view per signal ----
-                st.divider()
-                st.markdown("#### 📋 Signal Details")
-
-                for i, r in enumerate(running_trades):
-                    cross_price = (r['cross_high'] + r['cross_low']) / 2
-                    if r['direction'] == 'BUY':
-                        pnl_pts = r['current_price'] - cross_price
-                        sl_dist = r['current_price'] - r['sl']
-                        reward = r['tp'] - r['current_price']
-                        rr = round(reward / sl_dist, 2) if sl_dist > 0 else 0
-                        pnl_color = '#3fb950' if pnl_pts >= 0 else '#f85149'
-                    else:
-                        pnl_pts = cross_price - r['current_price']
-                        sl_dist = r['sl'] - r['current_price']
-                        reward = r['current_price'] - r['tp']
-                        rr = round(reward / sl_dist, 2) if sl_dist > 0 else 0
-                        pnl_color = '#3fb950' if pnl_pts >= 0 else '#f85149'
-
-                    sign = '+' if pnl_pts >= 0 else ''
-                    dir_color = '#3fb950' if r['direction'] == 'BUY' else '#f85149'
-
-                    with st.expander(f"{r['stage']} | {r['symbol']} {r['interval']} | {r['direction']} | Price: {r['current_price']}", expanded=False):
-                        col_a, col_b, col_c = st.columns(3)
-                        with col_a:
-                            st.markdown(f"**Entry Price** `{r['current_price']:.5f}`")
-                            st.markdown(f"**Crossover Time** `{r['crossover_time']}`")
-                            st.markdown(f"**Cross Price (avg)** `{cross_price:.5f}`")
-                            st.markdown(f"**Direction** <span style='color:{dir_color};font-weight:700'>{r['direction']}</span>", unsafe_allow_html=True)
-                        with col_b:
-                            st.markdown(f"**Stop Loss** `{r['sl']:.5f}`")
-                            st.markdown(f"**Take Profit** `{r['tp']:.5f}`")
-                            st.markdown(f"**ATR ({r['atr_mult']}×)** `{r['atr']:.5f}`")
-                            rr_c = '#3fb950' if rr >= 1.5 else ('#e3b341' if rr >= 1 else '#f85149')
-                            st.markdown(f"**Risk:Reward** <span style='color:{rr_c};font-weight:700'>{rr}</span>", unsafe_allow_html=True)
-                        with col_c:
-                            st.markdown(f"**EMA 20** `{r['ema_20']:.5f}`")
-                            st.markdown(f"**EMA 50** `{r['ema_50']:.5f}`")
-                            st.markdown(f"**Move from Cross** `{sign}{r['move_from_cross_pct']:.2f}%`")
-                            st.markdown(f"**Pullback** {'✅ In Pullback' if r['in_pullback'] else '❌ Not in Pullback'}")
-
-                        st.markdown("**Trailing Stops**")
-                        tc1, tc2, tc3 = st.columns(3)
-                        with tc1:
-                            st.metric("T25%", f"{r['trailing_25']:.5f}")
-                        with tc2:
-                            st.metric("T50%", f"{r['trailing_50']:.5f}")
-                        with tc3:
-                            st.metric("T75%", f"{r['trailing_75']:.5f}")
+                export_df = pd.DataFrame(rows)
+                csv = export_df.to_csv(index=False)
+                st.download_button("📥 Export Open Trades", csv, "open_trades.csv", "text/csv", key='dl_open')
 
 else:
     st.divider()
