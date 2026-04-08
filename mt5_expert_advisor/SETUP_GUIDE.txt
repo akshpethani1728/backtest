@@ -1,0 +1,216 @@
+# Vantage MT5 EMA ATR Trading System - Installation Guide
+
+## Files Included
+
+- `VantageEMAATR_Strategy.mq5` - The Expert Advisor (EA) file
+
+---
+
+## Step 1: Open MetaEditor
+
+1. Open **MetaTrader 5** (MT5)
+2. Go to **Tools** → **MetaQuotes Language Editor**
+   - Or press `F4` on your keyboard
+
+---
+
+## Step 2: Create New File
+
+1. In MetaEditor, click **File** → **New**
+2. Or press `Ctrl+N`
+
+3. A popup will appear, select **Expert Advisor (template)**
+4. Click **Next**
+5. Name it: `VantageEMAATR_Strategy`
+6. Click **Finish**
+
+---
+
+## Step 3: Replace Code
+
+1. **Select all** the default code in the editor (Ctrl+A)
+2. **Delete** it
+3. Open the file `VantageEMAATR_Strategy.mq5` I created
+4. **Copy all the contents**
+5. **Paste** into MetaEditor
+
+6. Click **Compile** (F7) or the green arrow ▶️
+
+7. You should see:
+   ```
+   VantageEMAATR_Strategy.mq5 (0 errors, 0 warnings)
+   ```
+
+---
+
+## Step 4: Connect to Vantage Demo
+
+### Method A: Vantage MT5 Platform
+1. Download **Vantage MT5** from their official website if you haven't
+2. Open the MT5 platform
+3. Go to **File** → **Open Account**
+4. Select **Vantage FX**
+5. Enter your **demo account credentials**
+6. Server: Look for a Vantage demo server (e.g., `VantageInternational-Demo`)
+
+### Method B: Link Existing MT5 to Vantage
+1. Open MT5
+2. Go to **File** → **Connect to Trade Account**
+3. Enter your Vantage demo account details
+
+---
+
+## Step 5: Load EA to Chart
+
+1. Open MT5
+2. Go to **File** → **Open Chart**
+3. Select the **symbol/pair** you want to trade (e.g., EUR/USD)
+4. Wait for data to load
+
+5. In the **Navigator** panel (left side):
+   - Click **Expert Advisors**
+   - Find **`VantageEMAATR_Strategy`**
+   - **Drag it** onto your chart
+
+6. Or press `Ctrl+E` to open **Expert Advisors** panel
+   - Right-click → **Attach to Chart**
+
+---
+
+## Step 6: Configure EA Inputs
+
+A settings window will appear. Configure:
+
+### TRADING ON/OFF
+- ✅ **EnableTrading** = `true` (to start automation)
+- ⬜️ **EnableTrading** = `false` (to stop)
+- **MagicNumber** = `2024` (unique ID for this EA)
+
+### INDICATOR SETTINGS
+- **FastEMA Period** = `20`
+- **SlowEMA Period** = `50`
+- **ATR Period** = `14`
+- **ATR Multiplier** = `1.5` (adjustable: 0.5 to 10.0)
+
+### LOT & RISK
+- **UseFixedLot** = `true` (for fixed 0.1 lot)
+- **FixedLotSize** = `0.1` (for 10,000 units)
+- Set to `false` for risk-based lot sizing
+
+### ATR REVERSAL SETTINGS
+- ✅ **EnableATRReversal** = `true`
+- **ATRReversalThreshold** = `1.2` (20% ATR expansion)
+
+### TRADE MANAGEMENT
+- ✅ **UseTrailingStop** = `true`
+- ✅ **CloseOnOpposite** = `true`
+- **MaxTradesPerDay** = `5`
+
+---
+
+## Step 7: Start Automated Trading
+
+1. Make sure **EnableTrading** is set to `true`
+2. Click **OK** on the settings window
+3. Look for the **EA icon** in the top-right corner of the chart:
+   - 😐 = EA running, no trade
+   - 🙂 = EA running, trade open
+   - ⚠️ = Error (check log)
+
+4. The EA will:
+   - ✅ Check for EMA crossover every tick
+   - ✅ Open trades automatically
+   - ✅ Set ATR trailing stop
+   - ✅ Exit on ATR reversal or opposite signal
+
+---
+
+## How to Turn ON/OFF the System
+
+### Quick Method:
+1. Right-click on the chart
+2. Select **Expert List** (or press `Ctrl+E`)
+3. Find your EA
+4. Click the **play/pause button** 🏹 / ⏸️
+
+### Settings Method:
+1. Double-click the EA on the chart (or right-click → Properties)
+2. Go to **Inputs** tab
+3. Change **EnableTrading** to:
+   - `true` = ON (automated trading active)
+   - `false` = OFF (no new trades, closes existing)
+4. Click **OK**
+
+---
+
+## Monitoring Trades
+
+### Check Open Trades:
+1. Press `Ctrl+T` to open **Trade** panel (bottom)
+2. Or go to **View** → **Toolbox** → **Trade**
+
+### Check EA Status:
+1. Press `Ctrl+E` for **Expert Advisors** panel
+2. Shows: Profit, Trades count, Signals
+
+### View Journal/Logs:
+1. Press `Ctrl+T` then click **Journal** tab
+2. Shows all EA activity and errors
+
+---
+
+## Common Issues & Fixes
+
+### "EA not trading"
+- Check if **EnableTrading** = `true`
+- Check if **Allow Live Trading** is enabled in EA settings
+- Check the **Journal** tab for errors
+
+### "Trade context busy"
+- Only one EA should be on the chart
+- Remove other EAs from the same symbol
+
+### "Invalid lotsize"
+- Reduce lot size
+- Check your account balance is sufficient
+
+### "No data loaded"
+- Wait for chart to fully load
+- Check internet connection
+
+---
+
+## EA Settings Reference
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| EnableTrading | true | Master ON/OFF switch |
+| MagicNumber | 2024 | ID for this EA's trades |
+| FastEMA_Period | 20 | Fast EMA period |
+| SlowEMA_Period | 50 | Slow EMA period |
+| ATR_Period | 14 | ATR period |
+| ATR_Multiplier | 1.5 | Stop loss distance |
+| FixedLotSize | 0.1 | Lot size (0.1 = 10K units) |
+| EnableATRReversal | true | Enable ATR reversal exit |
+| ATRReversalThreshold | 1.2 | ATR expansion threshold |
+| UseTrailingStop | true | Use ATR trailing stop |
+| CloseOnOpposite | true | Exit on opposite signal |
+
+---
+
+## Disclaimer
+
+This EA is for **demo trading only**. Use at your own risk. Always test on a demo account first.
+
+**Note:** For live trading, always ensure you have proper risk management and understand the strategy fully.
+
+---
+
+## Support
+
+If you need modifications to the strategy:
+- Change EMA periods
+- Adjust ATR multiplier
+- Add custom conditions
+
+Just let me know and I can update the EA code for you.
